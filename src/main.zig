@@ -8,8 +8,11 @@ pub fn main() !void {
     var chunk = Chunk.new(alloc);
     defer chunk.deinit();
 
-    try chunk.write(.Return);
-    try chunk.write(.{ .Call = 255 });
+    try chunk.write_instruction(.Return, 0);
+    try chunk.write_instruction(.{ .Call = 255 }, 1);
+    const cnst = try chunk.write_constant(0.1212);
+    try chunk.write_instruction(.{ .Constant = cnst }, 1);
+
     std.debug.print("{any}\n", .{chunk.code.items});
 
     var dis = Disassembler.new(chunk.reader(), "first test code");
@@ -32,10 +35,12 @@ const Disassembler = struct {
     pub fn disassemble(self: *Self) !void {
         const print = std.debug.print;
         print("----- {s} -----\n", .{self.name});
+        print("line no. | byte no. | opcode | args \n\n", .{});
 
         var inst: Instruction = undefined;
         while (self.chunk.has_next()) {
-            print("{X:2} ", .{self.chunk.curr});
+            print("{:4} ", .{self.chunk.line_nos[self.chunk.curr_line]});
+            print("{:5} ", .{self.chunk.curr});
 
             inst = self.chunk.next_instruction() catch |err| {
                 print("Bad Opcode: {X:2}\n", .{try self.chunk.next_byte()});
@@ -48,21 +53,24 @@ const Disassembler = struct {
                     const payload = comptime @field(inst, name);
                     const payload_size = comptime @sizeOf(@TypeOf(payload));
 
-                    print(name ++ " ", .{});
+                    print("{s:<10} ", .{name});
 
                     inline for ([_]u8{0} ** payload_size) |_, j| {
                         const bytes = std.mem.asBytes(&payload);
                         const byte = bytes[j];
-                        print("{X:2}", .{byte});
+                        print("{X:0>2} ", .{byte});
+                    }
+
+                    if (payload_size > 0) {
+                        print("({}) ", .{payload});
+
+                        if (.Constant == tag) {
+                            const val = self.chunk.consts[payload];
+                            print("[{}]", .{val});
+                        }
                     }
                 }
             }
-
-            // switch (inst) {
-            //     .Return => print("RETURN", .{}),
-            //     .Call => |b| print("CALL {X:2}", .{b}),
-            //     else => unreachable,
-            // }
 
             print("\n", .{});
         }
@@ -77,37 +85,50 @@ const Error = error{
 const Chunk = struct {
     const Self = @This();
     const ByteList = std.ArrayListUnmanaged(u8);
+    const ConstantList = std.ArrayListUnmanaged(f64);
+    const LineNoList = std.ArrayListUnmanaged(usize);
 
     alloc: std.mem.Allocator,
     code: ByteList,
+    consts: ConstantList,
+
+    line_nos: LineNoList,
 
     fn new(alloc: std.mem.Allocator) Self {
-        return .{ .alloc = alloc, .code = ByteList{} };
+        return .{ .alloc = alloc, .code = ByteList{}, .consts = ConstantList{}, .line_nos = LineNoList{} };
     }
 
     fn deinit(self: *Self) void {
         self.code.deinit(self.alloc);
+        self.consts.deinit(self.alloc);
+        self.line_nos.deinit(self.alloc);
     }
 
     fn reader(self: *Self) ChunkReader {
-        return ChunkReader.new(self.code.items);
+        return .{
+            .code = self.code.items,
+            .curr = 0,
+            .consts = self.consts.items,
+            .line_nos = self.line_nos.items,
+            .curr_line = 0,
+        };
     }
 
-    fn write(self: *Self, inst: Instruction) !void {
+    fn write_constant(self: *Self, constant: f64) !u8 {
+        try self.consts.append(self.alloc, constant);
+        return @intCast(u8, self.consts.items.len - 1);
+    }
+
+    fn write_instruction(self: *Self, inst: Instruction, line: usize) !void {
         const opcode = @enumToInt(inst);
         try self.code.append(self.alloc, opcode);
+        try self.line_nos.append(self.alloc, line);
 
         inline for (std.meta.tags(Opcode)) |tag, i| {
             if (tag == inst) {
                 const name = comptime std.meta.fieldNames(Opcode)[i];
                 const payload = comptime @field(inst, name);
-                const payload_size = comptime @sizeOf(@TypeOf(payload));
-                // std.meta.activeTag()
-                inline for ([_]u8{0} ** payload_size) |_, j| {
-                    const bytes = std.mem.asBytes(&payload);
-                    const byte = bytes[j];
-                    try self.code.append(self.alloc, byte);
-                }
+                try self.code.appendSlice(self.alloc, std.mem.asBytes(&payload));
             }
         }
     }
@@ -118,13 +139,10 @@ const ChunkReader = struct {
 
     code: []u8,
     curr: usize,
+    consts: []f64,
 
-    fn new(code: []u8) Self {
-        return .{
-            .code = code,
-            .curr = 0,
-        };
-    }
+    line_nos: []usize,
+    curr_line: usize,
 
     fn has_next(self: *Self) bool {
         return self.code.len > self.curr;
@@ -177,6 +195,7 @@ const ChunkReader = struct {
             }
         }
 
+        self.curr_line += 1;
         return inst;
     }
 };
@@ -186,7 +205,7 @@ const Instruction = union(enum) {
 
     Return,
     Call: u8,
-    Constant: f64,
+    Constant: u8,
 };
 
 const Opcode = std.meta.Tag(Instruction);
