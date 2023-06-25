@@ -42,10 +42,27 @@ const Disassembler = struct {
                 return err;
             };
 
-            switch (inst) {
-                .Return => print("RETURN", .{}),
-                .Call => |b| print("CALL {X:2}", .{b}),
+            inline for (std.meta.tags(Opcode)) |tag, i| {
+                if (tag == inst) {
+                    const name = comptime std.meta.fieldNames(Opcode)[i];
+                    const payload = comptime @field(inst, name);
+                    const payload_size = comptime @sizeOf(@TypeOf(payload));
+
+                    print(name ++ " ", .{});
+
+                    inline for ([_]u8{0} ** payload_size) |_, j| {
+                        const bytes = std.mem.asBytes(&payload);
+                        const byte = bytes[j];
+                        print("{X:2}", .{byte});
+                    }
+                }
             }
+
+            // switch (inst) {
+            //     .Return => print("RETURN", .{}),
+            //     .Call => |b| print("CALL {X:2}", .{b}),
+            //     else => unreachable,
+            // }
 
             print("\n", .{});
         }
@@ -80,9 +97,18 @@ const Chunk = struct {
         const opcode = @enumToInt(inst);
         try self.code.append(self.alloc, opcode);
 
-        switch (inst) {
-            .Return => {},
-            .Call => |byte| try self.code.append(self.alloc, byte),
+        inline for (std.meta.tags(Opcode)) |tag, i| {
+            if (tag == inst) {
+                const name = comptime std.meta.fieldNames(Opcode)[i];
+                const payload = comptime @field(inst, name);
+                const payload_size = comptime @sizeOf(@TypeOf(payload));
+                // std.meta.activeTag()
+                inline for ([_]u8{0} ** payload_size) |_, j| {
+                    const bytes = std.mem.asBytes(&payload);
+                    const byte = bytes[j];
+                    try self.code.append(self.alloc, byte);
+                }
+            }
         }
     }
 };
@@ -124,24 +150,46 @@ const ChunkReader = struct {
 
     fn next_instruction(self: *Self) !Instruction {
         const opcode = try self.next_opcode();
-        switch (opcode) {
-            .Return => return .Return,
-            .Call => return .{ .Call = try self.next_byte() },
+
+        var inst: Instruction = undefined;
+
+        inline for (std.meta.tags(Opcode)) |tag, i| {
+            if (tag == opcode) {
+                const name = comptime std.meta.fieldNames(Opcode)[i];
+                const field_index = comptime std.meta.fieldIndex(Instruction, name).?;
+                const field = comptime std.meta.fields(Instruction)[field_index];
+                const payload_type = comptime field.field_type;
+                const payload_size = comptime @sizeOf(payload_type);
+
+                if (payload_size > 0) {
+                    const start = self.code[self.curr..];
+
+                    self.curr += payload_size;
+                    if (self.code.len < self.curr) {
+                        return error.NoBytes;
+                    }
+
+                    const val = std.mem.bytesToValue(payload_type, start[0..payload_size]);
+                    inst = @unionInit(Instruction, name, val);
+                } else {
+                    inst = @unionInit(Instruction, name, {});
+                }
+            }
         }
+
+        return inst;
     }
 };
 
-const Instruction = union(Opcode) {
+const Instruction = union(enum) {
     const Self = @This();
 
     Return,
     Call: u8,
+    Constant: f64,
 };
 
-const Opcode = enum(u8) {
-    Return,
-    Call,
-};
+const Opcode = std.meta.Tag(Instruction);
 
 test "size test" {
     std.debug.assert(@sizeOf(Instruction) == 2);
