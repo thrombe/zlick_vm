@@ -14,6 +14,9 @@ pub fn build(b: *std.build.Builder) void {
     const exe = b.addExecutable("zlick", "src/main.zig");
     exe.setTarget(target);
     exe.setBuildMode(mode);
+    var options = b.addOptions();
+    options.addOption(bool, "trace_enable", b.option(bool, "enable-tracing", "enables VM tracing") orelse false);
+    exe.addOptions("build_options", options);
     exe.install();
 
     const run_cmd = exe.run();

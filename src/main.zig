@@ -1,5 +1,8 @@
 const std = @import("std");
 
+const build_options = @import("build_options");
+const trace_enabled = build_options.trace_enable;
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -8,85 +11,194 @@ pub fn main() !void {
     var chunk = Chunk.new(alloc);
     defer chunk.deinit();
 
-    try chunk.write_instruction(.Return, 0);
-    try chunk.write_instruction(.{ .Call = 255 }, 1);
+    // try chunk.write_instruction(.{ .Call = 255 }, 1);
     const cnst = try chunk.write_constant(0.1212);
     try chunk.write_instruction(.{ .Constant = cnst }, 1);
+    try chunk.write_instruction(.Negate, 0);
+    try chunk.write_instruction(.Return, 0);
 
     std.debug.print("{any}\n", .{chunk.code.items});
 
-    var dis = Disassembler.new(chunk.reader(), "first test code");
-    try dis.disassemble();
+    var vm = try Vm.new(&chunk);
+    defer vm.deinit();
+
+    _ = try vm.run();
 }
+
+const Vm = struct {
+    const Self = @This();
+    const Result = enum {
+        Ok,
+    };
+
+    chunk: *Chunk,
+    dis: Disassembler,
+    stack: []f64,
+    stack_top: usize,
+
+    // TODO: it might be faster to deref a pointer than indexing an array.
+    // but it is easier to modify the chunk curr position.
+    // maybe check the speed difference and implement it using pointers instead
+
+    // TODO: “direct threaded code”, “jump table”, and “computed goto”
+
+    fn new(chunk: *Chunk) !Self {
+        var stack = try chunk.alloc.alloc(f64, 256);
+        return .{ .chunk = chunk, .stack = stack, .stack_top = 0, .dis = Disassembler.new(chunk) };
+    }
+
+    fn deinit(self: *Self) void {
+        self.chunk.alloc.free(self.stack);
+    }
+
+    pub fn run(self: *Self) !Result {
+        var reader = self.chunk.reader();
+
+        while (reader.has_next()) {
+            const start = reader.curr;
+            const inst = try reader.next_instruction();
+
+            if (trace_enabled) {
+                std.debug.print("{any}\n", .{self.stack[0..self.stack_top]});
+                try self.dis.disassemble_instruction(inst, start);
+            }
+
+            switch (inst) {
+                .Return => {
+                    std.debug.print("{}\n", .{try self.pop_value()});
+                    return .Ok;
+                },
+                .Constant => |index| try self.push_value(self.chunk.consts.items[index]),
+                .Negate => try self.push_value(-try self.pop_value()),
+                .Add => {
+                    var v1 = try self.pop_value();
+                    var v2 = try self.pop_value();
+                    try self.push_value(v2 + v1);
+                },
+                .Subtract => {
+                    var v1 = try self.pop_value();
+                    var v2 = try self.pop_value();
+                    try self.push_value(v2 - v1);
+                },
+                .Multiply => {
+                    var v1 = try self.pop_value();
+                    var v2 = try self.pop_value();
+                    try self.push_value(v2 * v1);
+                },
+                .Divide => {
+                    var v1 = try self.pop_value();
+                    var v2 = try self.pop_value();
+                    try self.push_value(v2 / v1);
+                },
+                .Call => {},
+            }
+        }
+
+        return .Ok;
+    }
+
+    fn push_value(self: *Self, val: f64) !void {
+        if (self.stack.len > self.stack_top) {
+            self.stack[self.stack_top] = val;
+            self.stack_top += 1;
+        } else {
+            return error.StackOverflow;
+        }
+    }
+
+    fn pop_value(self: *Self) !f64 {
+        if (self.stack_top > 0) {
+            self.stack_top -= 1;
+            return self.stack[self.stack_top];
+        } else {
+            return error.StackUnderflow;
+        }
+    }
+};
 
 const Disassembler = struct {
     const Self = @This();
 
-    chunk: ChunkReader,
-    name: []const u8,
+    chunk: *Chunk,
 
-    pub fn new(chunk: ChunkReader, name: []const u8) Self {
+    pub fn new(chunk: *Chunk) Self {
         return .{
             .chunk = chunk,
-            .name = name,
         };
     }
 
-    pub fn disassemble(self: *Self) !void {
+    pub fn disassemble_chunk(self: *Self, name: []const u8) !void {
+        var reader = self.chunk.reader();
+
         const print = std.debug.print;
-        print("----- {s} -----\n", .{self.name});
+        print("----- {s} -----\n", .{name});
         print("line no. | byte no. | opcode | args \n\n", .{});
 
         var inst: Instruction = undefined;
-        while (self.chunk.has_next()) {
-            print("{:4} ", .{self.chunk.line_nos[self.chunk.curr_line]});
-            print("{:5} ", .{self.chunk.curr});
+        while (reader.has_next()) {
+            var start = reader.curr;
 
-            inst = self.chunk.next_instruction() catch |err| {
-                print("Bad Opcode: {X:2}\n", .{try self.chunk.next_byte()});
+            inst = reader.next_instruction() catch |err| {
+                print("Bad Opcode: {X:2}\n", .{try reader.next_byte()});
                 return err;
             };
 
-            inline for (std.meta.tags(Opcode)) |tag, i| {
-                if (tag == inst) {
-                    const name = comptime std.meta.fieldNames(Opcode)[i];
-                    const payload = comptime @field(inst, name);
-                    const payload_size = comptime @sizeOf(@TypeOf(payload));
+            try self.disassemble_instruction(inst, start);
+        }
+    }
 
-                    print("{s:<10} ", .{name});
+    pub fn disassemble_instruction(self: *Self, inst: Instruction, start: usize) !void {
+        const print = std.debug.print;
 
-                    inline for ([_]u8{0} ** payload_size) |_, j| {
-                        const bytes = std.mem.asBytes(&payload);
-                        const byte = bytes[j];
-                        print("{X:0>2} ", .{byte});
-                    }
+        print("{:4} ", .{try self.chunk.get_line_number(start)});
+        print("{:5} ", .{start});
 
-                    if (payload_size > 0) {
-                        print("({}) ", .{payload});
+        inline for (std.meta.tags(Opcode)) |tag, i| {
+            if (tag == inst) {
+                const name = comptime std.meta.fieldNames(Opcode)[i];
+                const payload = comptime @field(inst, name);
+                const payload_size = comptime @sizeOf(@TypeOf(payload));
 
-                        if (.Constant == tag) {
-                            const val = self.chunk.consts[payload];
-                            print("[{}]", .{val});
-                        }
+                print("{s:<10} ", .{name});
+
+                inline for ([_]u8{0} ** payload_size) |_, j| {
+                    const bytes = std.mem.asBytes(&payload);
+                    const byte = bytes[j];
+                    print("{X:0>2} ", .{byte});
+                }
+
+                if (payload_size > 0) {
+                    print("({}) ", .{payload});
+
+                    if (.Constant == tag) {
+                        const val = self.chunk.consts.items[payload];
+                        print("[{}]", .{val});
                     }
                 }
             }
-
-            print("\n", .{});
         }
+
+        print("\n", .{});
     }
 };
 
 const Error = error{
     NoBytes,
     BadOpcode,
+    BadByteOffset,
+    StackOverflow,
+    StackUnderflow,
 };
 
 const Chunk = struct {
     const Self = @This();
     const ByteList = std.ArrayListUnmanaged(u8);
     const ConstantList = std.ArrayListUnmanaged(f64);
-    const LineNoList = std.ArrayListUnmanaged(usize);
+    const LineInfo = struct {
+        line: usize,
+        bytes: usize,
+    };
+    const LineNoList = std.ArrayListUnmanaged(LineInfo);
 
     alloc: std.mem.Allocator,
     code: ByteList,
@@ -108,9 +220,6 @@ const Chunk = struct {
         return .{
             .code = self.code.items,
             .curr = 0,
-            .consts = self.consts.items,
-            .line_nos = self.line_nos.items,
-            .curr_line = 0,
         };
     }
 
@@ -122,15 +231,41 @@ const Chunk = struct {
     fn write_instruction(self: *Self, inst: Instruction, line: usize) !void {
         const opcode = @enumToInt(inst);
         try self.code.append(self.alloc, opcode);
-        try self.line_nos.append(self.alloc, line);
+
+        if (self.line_nos.items.len == 0) {
+            try self.line_nos.append(self.alloc, .{ .line = line, .bytes = 0 });
+        }
+
+        var info: *LineInfo = &self.line_nos.items[self.line_nos.items.len - 1];
+        if (info.line != line) {
+            try self.line_nos.append(self.alloc, .{ .line = line, .bytes = 0 });
+            info = &self.line_nos.items[self.line_nos.items.len - 1];
+        }
 
         inline for (std.meta.tags(Opcode)) |tag, i| {
             if (tag == inst) {
                 const name = comptime std.meta.fieldNames(Opcode)[i];
                 const payload = comptime @field(inst, name);
+
+                const payload_size = comptime @sizeOf(@TypeOf(payload));
+                info.bytes += payload_size + 1;
+
                 try self.code.appendSlice(self.alloc, std.mem.asBytes(&payload));
             }
         }
+    }
+
+    fn get_line_number(self: *Self, byte_offset: usize) !usize {
+        var num = byte_offset;
+        for (self.line_nos.items) |info| {
+            if (num < info.bytes) {
+                return info.line;
+            } else {
+                num -= info.bytes;
+            }
+        }
+
+        return error.BadByteOffset;
     }
 };
 
@@ -139,10 +274,6 @@ const ChunkReader = struct {
 
     code: []u8,
     curr: usize,
-    consts: []f64,
-
-    line_nos: []usize,
-    curr_line: usize,
 
     fn has_next(self: *Self) bool {
         return self.code.len > self.curr;
@@ -195,7 +326,6 @@ const ChunkReader = struct {
             }
         }
 
-        self.curr_line += 1;
         return inst;
     }
 };
@@ -206,6 +336,11 @@ const Instruction = union(enum) {
     Return,
     Call: u8,
     Constant: u8,
+    Negate,
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
 };
 
 const Opcode = std.meta.Tag(Instruction);
