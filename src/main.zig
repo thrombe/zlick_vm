@@ -3,30 +3,214 @@ const std = @import("std");
 const build_options = @import("build_options");
 const trace_enabled = build_options.trace_enable;
 
+const lexer = @import("lexer.zig");
+const Lexer = lexer.Lexer;
+const TokenInfo = lexer.TokenInfo;
+const Token = lexer.Token;
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
 
     const alloc = gpa.allocator();
+
+    const args = try std.process.argsAlloc(alloc);
+    defer std.process.argsFree(alloc, args);
+
     var chunk = Chunk.new(alloc);
     defer chunk.deinit();
 
-    // try chunk.write_instruction(.{ .Call = 255 }, 1);
-    const cnst = try chunk.write_constant(0.1212);
-    try chunk.write_instruction(.{ .Constant = cnst }, 1);
-    try chunk.write_instruction(.Negate, 0);
-    try chunk.write_instruction(.Return, 0);
+    const stdout = std.io.getStdOut().writer();
 
-    std.debug.print("{any}\n", .{chunk.code.items});
+    var zlick = try Zlick.new(alloc);
+    defer zlick.deinit();
 
-    var vm = try Vm.new(&chunk);
-    defer vm.deinit();
+    if (args.len > 2) {
+        try stdout.print("lokx [script]\n", .{});
+    } else if (args.len == 2) {
+        try zlick.run_file(args[1]);
+    } else {
+        try zlick.repl();
+    }
 
-    _ = try vm.run();
+    // var vm = try Vm.new(&chunk);
+    // defer vm.deinit();
+
+    // _ = try vm.run();
 }
+
+const Zlick = struct {
+    const Self = @This();
+
+    alloc: std.mem.Allocator,
+    chunk: *Chunk,
+    vm: Vm,
+
+    fn new(alloc: std.mem.Allocator) !Self {
+        var chunk = try alloc.create(Chunk);
+        chunk.* = Chunk.new(alloc);
+        const vm = try Vm.new(chunk);
+        return .{ .alloc = alloc, .chunk = chunk, .vm = vm };
+    }
+
+    fn deinit(self: *Self) void {
+        self.vm.deinit();
+        self.chunk.deinit();
+        self.alloc.destroy(self.chunk);
+    }
+
+    fn repl(self: *Self) !void {
+        const stdout = std.io.getStdOut().writer();
+        const stdin = std.io.getStdIn().reader();
+
+        // assume users are not gonna type in strings too long
+        var buff: [1024]u8 = undefined;
+        while (true) {
+            try stdout.print("> ", .{});
+
+            if (stdin.readUntilDelimiterOrEof(&buff, '\n') catch null) |line| {
+                try self.run(line);
+            } else {
+                try stdout.print("\n", .{});
+                break;
+            }
+        }
+    }
+
+    fn run_file(self: *Self, fp: []const u8) !void {
+        var f = try std.fs.cwd().openFile(fp, .{});
+        defer f.close();
+
+        var str = try f.readToEndAlloc(self.alloc, 10_000_000);
+        defer self.alloc.free(str);
+
+        try self.run(str);
+    }
+
+    fn run(self: *Self, code: []const u8) !void {
+        var compiler = try Compiler.new(self.chunk, self.alloc);
+        defer compiler.deinit();
+
+        try compiler.compile(code);
+
+        // var scanner = try Lexer.new(code, self.alloc);
+        // defer scanner.deinit();
+
+        // var tokens = std.ArrayList(Token).init(self.alloc);
+        // while (try scanner.next()) |token| {
+        //     try tokens.append(token);
+        //     // std.debug.print("{any}\n", .{token});
+        // }
+
+        // var parser = Parser.new(tokens.toOwnedSlice(), alloc);
+        // defer parser.deinit();
+
+        // while (try parser.next_stmt()) |s| {
+        //     try temp.append(s);
+
+        //     // try printer.print_stmt(s);
+
+        //     resolver.resolve_stmt(s) catch |err| {
+        //         std.debug.print("{}\n", .{err});
+        //         self.had_err = true;
+        //         continue;
+        //     };
+
+        //     if (self.had_err) {
+        //         continue;
+        //     }
+
+        //     var r = interpreter.evaluate_stmt(s);
+
+        //     if (r) |res| {
+        //         switch (res) {
+        //             .Void => {},
+        //             .Continue => return error.BadContinue,
+        //             .Break => return error.BadBreak,
+        //             .Return => return error.BadReturn,
+        //         }
+        //     } else |err| {
+        //         std.debug.print("{}\n", .{err});
+        //         self.had_err = true;
+        //     }
+        // }
+    }
+};
+
+const Compiler = struct {
+    const Self = @This();
+    const Error = error{
+        UnexpectedEof,
+        ExpectedEof,
+    };
+
+    const Precedence = enum {
+        None,
+        Assignment, // =
+        Or, // or
+        And, // and
+        Equality, // == !=
+        Comparison, // < > <= >=
+        Term, // + -
+        Factor, // * /
+        Unary, // ! -
+        Call, // . ()
+        Primary,
+    };
+
+    chunk: *Chunk,
+    lexer: Lexer,
+
+    had_error: bool = false,
+    panic_mode: bool = false,
+
+    prev: TokenInfo = undefined,
+    curr: TokenInfo = undefined,
+
+    fn new(chunk: *Chunk, alloc: std.mem.Allocator) !Self {
+        return .{ .chunk = chunk, .lexer = try Lexer.new("", alloc) };
+    }
+
+    fn deinit(self: *Self) void {
+        self.lexer.deinit();
+    }
+
+    fn advance(self: *Self) !void {
+        self.prev = self.curr;
+
+        defer std.debug.print("{any}\n", .{self.curr.tok});
+
+        self.curr = try self.lexer.next() orelse return error.UnexpectedEof;
+    }
+
+    fn consume(self: *Self, typ: Token.Type, err: Self.Error) !void {
+        if (typ == self.curr.tok) {
+            try self.advance();
+        } else {
+            return err;
+        }
+    }
+
+    fn write_instruction(self: *Self, inst: Instruction) !void {
+        try self.chunk.write_instruction(inst, self.lexer.line);
+    }
+
+    fn compile(self: *Self, code: []const u8) !void {
+        self.lexer.code(code);
+
+        try self.advance();
+        // self.expression();
+        try self.consume(.Eof, error.ExpectedEof);
+        try self.write_instruction(.Return);
+    }
+};
 
 const Vm = struct {
     const Self = @This();
+    const Error = error{
+        StackOverflow,
+        StackUnderflow,
+    };
     const Result = enum {
         Ok,
     };
@@ -182,16 +366,12 @@ const Disassembler = struct {
     }
 };
 
-const Error = error{
-    NoBytes,
-    BadOpcode,
-    BadByteOffset,
-    StackOverflow,
-    StackUnderflow,
-};
-
 const Chunk = struct {
     const Self = @This();
+    const Error = error{
+        BadByteOffset,
+    };
+
     const ByteList = std.ArrayListUnmanaged(u8);
     const ConstantList = std.ArrayListUnmanaged(f64);
     const LineInfo = struct {
@@ -271,6 +451,10 @@ const Chunk = struct {
 
 const ChunkReader = struct {
     const Self = @This();
+    const Error = error{
+        NoBytes,
+        BadOpcode,
+    };
 
     code: []u8,
     curr: usize,
