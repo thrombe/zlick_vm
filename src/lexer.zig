@@ -1,12 +1,15 @@
 const std = @import("std");
-const Token = @import("./parser.zig").Token;
-const ZlickErr = @import("./main.zig").ZlickErr;
 
-pub const Scanner = struct {
+pub const Lexer = struct {
     const Self = @This();
-    const TokenMap = std.StringHashMap(TokenType);
+    pub const Error = error{
+        UnterminatedString,
+        UnexpectedChar,
+    };
 
-    var keywords: TokenMap = undefined;
+    const TokenMap = std.StringHashMap(Token);
+
+    keywords: TokenMap,
 
     curr: usize,
     start: usize,
@@ -14,7 +17,8 @@ pub const Scanner = struct {
     str: []const u8,
 
     pub fn new(str: []const u8, alloc: std.mem.Allocator) !Self {
-        keywords = TokenMap.init(alloc);
+        var keywords = TokenMap.init(alloc);
+
         try keywords.put("and", .And);
         try keywords.put("class", .Class);
         try keywords.put("else", .Else);
@@ -35,22 +39,31 @@ pub const Scanner = struct {
 
         try keywords.put("print", .Print);
 
-        return .{ .start = 0, .curr = 0, .line = 1, .str = str };
+        return .{ .start = 0, .curr = 0, .line = 1, .str = str, .keywords = keywords };
+    }
+
+    pub fn code(self: *Self, str: []const u8) void {
+        self.str = str;
+        self.curr = 0;
+        self.start = 0;
     }
 
     pub fn deinit(self: *Self) void {
-        _ = self;
-        keywords.deinit();
+        self.keywords.deinit();
     }
 
-    pub fn next(self: *Self) !?Token {
-        if (self.str.len <= self.curr) {
+    pub fn next(self: *Self) !?TokenInfo {
+        if (self.str.len < self.curr) {
             return null;
+        } else if (self.str.len == self.curr) {
+            self.curr += 1;
+            return .{ .tok = .Eof, .line = self.line };
         }
+
         const c = self.str[self.curr];
         self.curr += 1;
 
-        var t: Token = undefined;
+        var t: TokenInfo = undefined;
         t.line = self.line;
 
         switch (c) {
@@ -141,7 +154,7 @@ pub const Scanner = struct {
                     }
                 }
                 const ident = self.str[self.curr .. self.curr + len];
-                t.tok = if (keywords.get(ident)) |tok| tok else .{ .Identifier = ident };
+                t.tok = if (self.keywords.get(ident)) |tok| tok else .{ .Identifier = ident };
                 self.curr += len;
             },
             else => return error.UnexpectedChar,
@@ -163,7 +176,9 @@ pub const Scanner = struct {
     }
 };
 
-pub const TokenType = union(enum) {
+pub const Token = union(enum) {
+    pub const Type = std.meta.Tag(Token);
+
     LeftParen,
     RightParen,
     LeftBrace,
@@ -210,25 +225,19 @@ pub const TokenType = union(enum) {
     Print,
 
     Eof,
+};
 
-    pub fn to_string(self: TokenType) []const u8 {
-        // return type + " " + lexeme + " " + literal;
-        switch (self) {
-            .Comma => return ",",
-            .Dot => return ".",
-            .Plus => return "+",
-            .Dash => return "-",
-            .Slash => return "/",
-            .Star => return "*",
-            .Bang => return "!",
-            .BangEqual => return "!=",
-            .DoubleEqual => return "==",
-            .Equal => return "=",
-            .Lt => return "<",
-            .Gt => return ">",
-            .Gte => return ">=",
-            .Lte => return "<=",
-            else => unreachable,
+pub const TokenInfo = struct {
+    const Self = @This();
+    tok: Token,
+    line: u64,
+
+    fn match(self: *Self, others: []const Token.Type) bool {
+        for (others) |typ| {
+            if (@as(Token.Type, self.tok) == typ) {
+                return true;
+            }
         }
+        return false;
     }
 };
