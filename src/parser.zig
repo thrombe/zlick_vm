@@ -202,6 +202,22 @@ pub const Stmt = union(enum) {
 
 pub const Parser = struct {
     const Self = @This();
+    const Error = error{
+        ExpectedDot,
+        ExpectedVariableName,
+        ExpectedParameter,
+        TooManyArguments,
+        ExpectedRightBrace,
+        ExpectedLeftParen,
+        ExpectedRightParen,
+        ExpectedLeftBrace,
+        ExpectedIdentifier,
+        InvalidAssignmentTarget,
+        ExpectedPrimaryExpression,
+        ExpectedSemicolon,
+        UnexpectedEOF,
+    };
+
     tokens: []Token,
     alloc: std.mem.Allocator,
     curr: usize,
@@ -316,10 +332,7 @@ pub const Parser = struct {
             if (!self.match_next(.Identifier)) {
                 return error.ExpectedIdentifier;
             }
-            var name = switch (self.tokens[self.curr]) {
-                .Identifier => |v| v,
-                else => unreachable,
-            };
+            var name = self.tokens[self.curr].Identifier;
             self.curr += 1;
             var super: ?[]const u8 = null;
             if (self.match_next(.Lt)) {
@@ -328,10 +341,7 @@ pub const Parser = struct {
                 if (!self.match_next(.Identifier)) {
                     return error.ExpectedIdentifier;
                 }
-                super = switch (self.tokens[self.curr]) {
-                    .Identifier => |superclass| superclass,
-                    else => unreachable,
-                };
+                super = self.tokens[self.curr].Identifier;
                 self.curr += 1;
             }
             if (!self.match_next(.LeftBrace)) {
