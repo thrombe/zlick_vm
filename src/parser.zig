@@ -34,6 +34,14 @@ pub const Expr = union(enum) {
         method: []const u8,
     },
 
+    pub const Literal = union(enum) {
+        True,
+        False,
+        None,
+        Number: []const u8,
+        String: []const u8,
+    };
+
     pub fn free(self: *Self, alloc: std.mem.Allocator) void {
         defer alloc.destroy(self);
 
@@ -64,14 +72,6 @@ pub const Expr = union(enum) {
             .Super => {},
         }
     }
-};
-
-pub const Literal = union(enum) {
-    True,
-    False,
-    None,
-    Number: []const u8,
-    String: []const u8,
 };
 
 pub const Stmt = union(enum) {

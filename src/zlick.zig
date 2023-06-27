@@ -70,7 +70,7 @@ pub const Zlick = struct {
         var lexer = try Lexer.new(code, self.alloc);
         defer lexer.deinit();
 
-        var compiler = try Compiler.new(self.chunk, self.alloc);
+        var compiler = try Compiler.new(self.chunk);
         defer compiler.deinit();
 
         var tokens = std.ArrayList(Token).init(self.alloc);
@@ -91,8 +91,8 @@ pub const Zlick = struct {
                 continue;
             }
 
-            var r = compiler.compile_stmt(s);
-            _ = r catch {};
+            var r = try compiler.compile_stmt(s);
+            _ = r;
 
             // if (r) |res| {
             //     switch (res) {
@@ -106,5 +106,10 @@ pub const Zlick = struct {
             //     self.had_err = true;
             // }
         }
+
+        var vm = try Vm.new(self.chunk);
+        defer vm.deinit();
+
+        _ = try vm.run();
     }
 };

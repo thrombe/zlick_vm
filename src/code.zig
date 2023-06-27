@@ -52,12 +52,12 @@ pub const Chunk = struct {
         };
     }
 
-    fn write_constant(self: *Self, constant: f64) !u8 {
+    pub fn write_constant(self: *Self, constant: f64) !u8 {
         try self.consts.append(self.alloc, constant);
         return @intCast(u8, self.consts.items.len - 1);
     }
 
-    fn write_instruction(self: *Self, inst: Instruction, line: usize) !void {
+    pub fn write_instruction(self: *Self, inst: Instruction, line: usize) !void {
         const opcode = @enumToInt(inst);
         try self.code.append(self.alloc, opcode);
 
@@ -84,7 +84,7 @@ pub const Chunk = struct {
         }
     }
 
-    fn get_line_number(self: *Self, byte_offset: usize) !usize {
+    pub fn get_line_number(self: *Self, byte_offset: usize) !usize {
         var num = byte_offset;
         for (self.line_nos.items) |info| {
             if (num < info.bytes) {
@@ -108,7 +108,7 @@ pub const ChunkReader = struct {
     code: []u8,
     curr: usize,
 
-    fn has_next(self: *Self) bool {
+    pub fn has_next(self: *Self) bool {
         return self.code.len > self.curr;
     }
 
