@@ -261,11 +261,14 @@ pub const Parser = struct {
 
     fn assignment_or_expr_stmt(self: *Self) !*Stmt {
         var expr = try self.expression();
+        errdefer expr.free(self.alloc);
 
         if (self.match_next(.Equal)) {
             self.curr += 1;
 
             var right = try self.expression();
+            errdefer right.free(self.alloc);
+
             if (!self.match_next(.Semicolon)) {
                 return error.ExpectedSemicolon;
             }
@@ -337,16 +340,18 @@ pub const Parser = struct {
             self.curr += 1;
 
             var methods = std.ArrayList(Stmt.Function).init(self.alloc);
-            errdefer methods.deinit();
+            errdefer {
+                for (methods.items) |method| {
+                    method.body.free(self.alloc);
+                }
+                methods.deinit();
+            }
 
             while (!self.match_any(&[_]Token.Type{ .RightBrace, .Eof })) {
                 var fun = try self.function();
                 defer self.alloc.destroy(fun);
 
-                var func = switch (fun.*) {
-                    .Function => |f| f,
-                    else => unreachable,
-                };
+                var func = fun.Function;
                 try methods.append(func);
             }
             if (!self.match_next(.RightBrace)) {
@@ -366,10 +371,7 @@ pub const Parser = struct {
         if (!self.match_next(.Identifier)) {
             return error.ExpectedIdentifier;
         }
-        var name = switch (self.tokens[self.curr]) {
-            .Identifier => |name| name,
-            else => unreachable,
-        };
+        var name = self.tokens[self.curr].Identifier;
         self.curr += 1;
 
         if (!self.match_next(.LeftParen)) {
@@ -386,10 +388,11 @@ pub const Parser = struct {
                     return error.TooManyArguments;
                 }
                 var param = try self.expression();
+                defer self.alloc.destroy(param);
+
                 switch (param.*) {
                     .Variable => |p| {
                         try params.append(p);
-                        defer self.alloc.destroy(param);
                     },
                     else => return error.ExpectedParameter,
                 }
@@ -425,13 +428,11 @@ pub const Parser = struct {
         if (self.match_next(.Identifier)) {
             var tok = self.tokens[self.curr];
             self.curr += 1;
-            var name: []const u8 = undefined;
-            switch (tok) {
-                .Identifier => |str| name = str,
-                else => unreachable,
-            }
+            var name = tok.Identifier;
 
             var init_expr: ?*Expr = null;
+            errdefer if (init_expr) |s| s.free(self.alloc);
+
             if (self.match_next(.Equal)) {
                 self.curr += 1;
                 init_expr = try self.expression();
@@ -465,14 +466,17 @@ pub const Parser = struct {
             self.curr += 1;
 
             var condition = try self.expression();
+            errdefer condition.free(self.alloc);
 
             if (!self.match_next(.LeftBrace)) {
                 return error.ExpectedLeftBrace;
             }
             self.curr += 1;
+
             var stmts = try self.block();
             var if_block = try self.alloc.create(Stmt);
             if_block.* = .{ .Block = stmts };
+            errdefer if_block.free(self.alloc);
 
             var stmt = try self.alloc.create(Stmt);
             errdefer self.alloc.destroy(stmt);
@@ -502,6 +506,7 @@ pub const Parser = struct {
             self.curr += 1;
 
             var condition = try self.expression();
+            errdefer condition.free(self.alloc);
 
             if (!self.match_next(.LeftBrace)) {
                 return error.ExpectedLeftBrace;
@@ -519,6 +524,8 @@ pub const Parser = struct {
             self.curr += 1;
 
             var start: ?*Stmt = null;
+            errdefer if (start) |s| s.free(self.alloc);
+
             if (self.match_next(.Let)) {
                 self.curr += 1;
 
@@ -530,6 +537,8 @@ pub const Parser = struct {
             }
 
             var mid: ?*Expr = null;
+            errdefer if (mid) |s| s.free(self.alloc);
+
             if (self.match_next(.Semicolon)) {
                 self.curr += 1;
             } else {
@@ -542,6 +551,8 @@ pub const Parser = struct {
             }
 
             var end: ?*Stmt = null;
+            errdefer if (end) |s| s.free(self.alloc);
+
             if (self.match_next(.Semicolon)) {
                 self.curr += 1;
             } else {
@@ -584,6 +595,8 @@ pub const Parser = struct {
             self.curr += 1;
 
             var expr: ?*Expr = null;
+            errdefer if (expr) |s| s.free(self.alloc);
+
             if (!self.match_next(.Semicolon)) {
                 expr = try self.expression();
             }
@@ -603,6 +616,13 @@ pub const Parser = struct {
 
     fn block(self: *Self) ![]*Stmt {
         var stmts = std.ArrayList(*Stmt).init(self.alloc);
+        errdefer {
+            for (stmts.items) |stmt| {
+                stmt.free(self.alloc);
+            }
+            stmts.deinit();
+        }
+
         while (!self.match_any(&[_]Token.Type{ .RightBrace, .Eof })) {
             try stmts.append(try self.declaration());
         }
@@ -616,6 +636,8 @@ pub const Parser = struct {
 
     fn print_stmt(self: *Self) !*Stmt {
         var val = try self.expression();
+        errdefer val.free(self.alloc);
+
         if (!self.match_next(.Semicolon)) {
             return error.ExpectedSemicolon;
         }
@@ -631,6 +653,7 @@ pub const Parser = struct {
 
     fn logic_or(self: *Self) anyerror!*Expr {
         var expr = try self.logic_and();
+        errdefer expr.free(self.alloc);
 
         while (self.match_next(.Or)) {
             var operator = self.tokens[self.curr];
@@ -647,6 +670,7 @@ pub const Parser = struct {
 
     fn logic_and(self: *Self) anyerror!*Expr {
         var expr = try self.equality();
+        errdefer expr.free(self.alloc);
 
         while (self.match_next(.And)) {
             var operator = self.tokens[self.curr];
@@ -663,6 +687,8 @@ pub const Parser = struct {
 
     fn equality(self: *Self) !*Expr {
         var left = try self.comparison();
+        errdefer left.free(self.alloc);
+
         while (self.match_any(&[_]Token.Type{ .BangEqual, .DoubleEqual })) {
             var operator = self.tokens[self.curr];
 
@@ -679,6 +705,7 @@ pub const Parser = struct {
 
     fn comparison(self: *Self) !*Expr {
         var left = try self.term();
+        errdefer left.free(self.alloc);
 
         while (self.match_any(&[_]Token.Type{ .Gt, .Gte, .Lt, .Lte })) {
             var operator = self.tokens[self.curr];
@@ -697,6 +724,7 @@ pub const Parser = struct {
 
     fn term(self: *Self) !*Expr {
         var expr = try self.factor();
+        errdefer expr.free(self.alloc);
 
         while (self.match_any(&[_]Token.Type{ .Dash, .Plus })) {
             var operator = self.tokens[self.curr];
@@ -715,6 +743,7 @@ pub const Parser = struct {
 
     fn factor(self: *Self) !*Expr {
         var expr = try self.unary();
+        errdefer expr.free(self.alloc);
 
         while (self.match_any(&[_]Token.Type{ .Slash, .Star })) {
             var operator = self.tokens[self.curr];
@@ -749,6 +778,7 @@ pub const Parser = struct {
 
     fn call(self: *Self) !*Expr {
         var expr = try self.primary();
+        errdefer expr.free(self.alloc);
 
         while (true) {
             if (self.match_next(.LeftParen)) {
@@ -761,10 +791,7 @@ pub const Parser = struct {
                 if (!self.match_next(.Identifier)) {
                     return error.ExpectedIdentifier;
                 }
-                var name = switch (self.tokens[self.curr]) {
-                    .Identifier => |n| n,
-                    else => unreachable,
-                };
+                var name = self.tokens[self.curr].Identifier;
                 self.curr += 1;
 
                 var e = .{ .Get = .{ .name = name, .object = expr } };
@@ -780,7 +807,12 @@ pub const Parser = struct {
 
     fn finish_call(self: *Self, callee: *Expr) !*Expr {
         var args = std.ArrayList(*Expr).init(self.alloc);
-        errdefer args.deinit();
+        errdefer {
+            for (args.items) |arg| {
+                arg.free(self.alloc);
+            }
+            args.deinit();
+        }
 
         if (!self.match_next(.RightParen)) {
             while (true) {
@@ -818,7 +850,6 @@ pub const Parser = struct {
         self.curr += 1;
 
         var expr = try self.alloc.create(Expr);
-        errdefer self.alloc.destroy(expr);
 
         switch (tok) {
             .False => expr.* = .{ .Literal = .False },
@@ -827,7 +858,10 @@ pub const Parser = struct {
             .Number => |num| expr.* = .{ .Literal = .{ .Number = num } },
             .String => |str| expr.* = .{ .Literal = .{ .String = str } },
             .LeftParen => {
+                self.alloc.destroy(expr);
                 expr = try self.expression();
+                errdefer expr.free(self.alloc);
+
                 if (self.tokens[self.curr] == .RightParen) {
                     self.curr += 1;
                 } else {
@@ -841,6 +875,8 @@ pub const Parser = struct {
             .Identifier => |name| expr.* = .{ .Variable = name },
             .Self => expr.* = .{ .Self = tok },
             .Super => {
+                errdefer self.alloc.destroy(expr);
+
                 if (!self.match_next(.Dot)) {
                     return error.ExpectedDot;
                 }
@@ -848,15 +884,14 @@ pub const Parser = struct {
                 if (!self.match_next(.Identifier)) {
                     return error.ExpectedIdentifier;
                 }
-                var method = switch (self.tokens[self.curr]) {
-                    .Identifier => |name| name,
-                    else => unreachable,
-                };
+                var method = self.tokens[self.curr].Identifier;
                 self.curr += 1;
 
                 expr.* = .{ .Super = .{ .keyword = tok, .method = method } };
             },
             else => {
+                errdefer self.alloc.destroy(expr);
+
                 self.warn(tok, "expected primary expression");
                 return error.ExpectedPrimaryExpression;
             },
