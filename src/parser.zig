@@ -1,27 +1,12 @@
 const std = @import("std");
 
-const TokenType = @import("./lexer.zig").TokenType;
-
-pub const Token = struct {
-    tok: TokenType,
-    line: u64,
-
-    fn match(self: *Token, others: []const TokenType) bool {
-        for (others) |typ| {
-            // std.testing.expectEqual
-            // return std.mem.allEqual(TokenType, &[_]TokenType{typ}, self.tok);
-            if (@as(std.meta.Tag(TokenType), self.tok) == typ) {
-                return true;
-            }
-            // if (self.tok == typ) {
-            //     return true;
-            // }
-        }
-        return false;
-    }
-};
+const lexer = @import("./lexer.zig");
+const Token = lexer.Token;
+const TokenInfo = lexer.TokenInfo;
 
 pub const Expr = union(enum) {
+    const Self = @This();
+
     Literal: Literal,
     Group: *Expr,
     Variable: []const u8,
@@ -48,6 +33,37 @@ pub const Expr = union(enum) {
         keyword: Token,
         method: []const u8,
     },
+
+    pub fn free(self: *Self, alloc: std.mem.Allocator) void {
+        defer alloc.destroy(self);
+
+        switch (self.*) {
+            .Binary => |val| {
+                val.left.free(alloc);
+                val.right.free(alloc);
+            },
+            .Unary => |val| {
+                val.oparand.free(alloc);
+            },
+            .Literal => {},
+            .Group => |val| {
+                val.free(alloc);
+            },
+            .Variable => {},
+            .Call => |val| {
+                val.callee.free(alloc);
+                for (val.args) |arg| {
+                    arg.free(alloc);
+                }
+                alloc.free(val.args);
+            },
+            .Get => |val| {
+                val.object.free(alloc);
+            },
+            .Self => {},
+            .Super => {},
+        }
+    }
 };
 
 pub const Literal = union(enum) {
@@ -59,6 +75,8 @@ pub const Literal = union(enum) {
 };
 
 pub const Stmt = union(enum) {
+    const Self = @This();
+
     Expr: *Expr,
     Print: *Expr,
     Let: struct {
@@ -108,6 +126,78 @@ pub const Stmt = union(enum) {
         params: [][]const u8,
         body: *Stmt,
     };
+
+    pub fn free(self: *Self, alloc: std.mem.Allocator) void {
+        defer alloc.destroy(self);
+
+        switch (self.*) {
+            .Print => |e| {
+                e.free(alloc);
+            },
+            .Expr => |e| {
+                e.free(alloc);
+            },
+            .Let => |e| {
+                if (e.init_expr) |ne| {
+                    ne.free(alloc);
+                }
+            },
+            .Assign => |v| {
+                v.expr.free(alloc);
+            },
+            .Block => |stmts| {
+                defer alloc.free(stmts);
+                for (stmts) |s| {
+                    s.free(alloc);
+                }
+            },
+            .If => |v| {
+                v.condition.free(alloc);
+                v.if_block.free(alloc);
+                if (v.else_block) |b| {
+                    b.free(alloc);
+                }
+            },
+            .Break, .Continue => {},
+            .While => |v| {
+                v.condition.free(alloc);
+                v.block.free(alloc);
+            },
+            .For => |val| {
+                if (val.start) |s| {
+                    s.free(alloc);
+                }
+                if (val.mid) |e| {
+                    e.free(alloc);
+                }
+                if (val.end) |s| {
+                    s.free(alloc);
+                }
+
+                val.block.free(alloc);
+            },
+            .Function => |func| {
+                alloc.free(func.params);
+                func.body.free(alloc);
+            },
+            .Return => |val| {
+                if (val.val) |v| {
+                    v.free(alloc);
+                }
+            },
+            .Class => |val| {
+                for (val.methods) |method| {
+                    alloc.free(method.params);
+                    method.body.free(alloc);
+                }
+                alloc.free(val.methods);
+            },
+            .Set => |val| {
+                val.value.free(alloc);
+                val.object.free(alloc);
+            },
+        }
+    }
 };
 
 pub const Parser = struct {
@@ -152,16 +242,16 @@ pub const Parser = struct {
         };
     }
 
-    fn match_next(self: *Self, token: TokenType) bool {
+    fn match_next(self: *Self, token: Token.Type) bool {
         if (self.tokens.len - 1 < self.curr) {
             return false;
         } else {
             var tok = self.tokens[self.curr];
-            return @as(std.meta.Tag(TokenType), tok.tok) == token;
+            return tok == token;
         }
     }
 
-    fn match_any(self: *Self, tokens: []const TokenType) bool {
+    fn match_any(self: *Self, tokens: []const Token.Type) bool {
         if (self.tokens.len - 1 < self.curr) {
             return false;
         } else {
@@ -220,10 +310,10 @@ pub const Parser = struct {
         } else if (self.match_next(.Class)) {
             self.curr += 1;
 
-            if (!self.match_next(.{ .Identifier = "" })) {
+            if (!self.match_next(.Identifier)) {
                 return error.ExpectedIdentifier;
             }
-            var name = switch (self.tokens[self.curr].tok) {
+            var name = switch (self.tokens[self.curr]) {
                 .Identifier => |v| v,
                 else => unreachable,
             };
@@ -232,10 +322,10 @@ pub const Parser = struct {
             if (self.match_next(.Lt)) {
                 self.curr += 1;
 
-                if (!self.match_next(.{ .Identifier = "" })) {
+                if (!self.match_next(.Identifier)) {
                     return error.ExpectedIdentifier;
                 }
-                super = switch (self.tokens[self.curr].tok) {
+                super = switch (self.tokens[self.curr]) {
                     .Identifier => |superclass| superclass,
                     else => unreachable,
                 };
@@ -249,7 +339,7 @@ pub const Parser = struct {
             var methods = std.ArrayList(Stmt.Function).init(self.alloc);
             errdefer methods.deinit();
 
-            while (!self.match_any(&[_]TokenType{ .RightBrace, .Eof })) {
+            while (!self.match_any(&[_]Token.Type{ .RightBrace, .Eof })) {
                 var fun = try self.function();
                 defer self.alloc.destroy(fun);
 
@@ -273,10 +363,10 @@ pub const Parser = struct {
     }
 
     fn function(self: *Self) !*Stmt {
-        if (!self.match_next(.{ .Identifier = "" })) {
+        if (!self.match_next(.Identifier)) {
             return error.ExpectedIdentifier;
         }
-        var name = switch (self.tokens[self.curr].tok) {
+        var name = switch (self.tokens[self.curr]) {
             .Identifier => |name| name,
             else => unreachable,
         };
@@ -332,11 +422,11 @@ pub const Parser = struct {
     }
 
     fn var_declaration(self: *Self) !*Stmt {
-        if (self.match_next(.{ .Identifier = undefined })) {
+        if (self.match_next(.Identifier)) {
             var tok = self.tokens[self.curr];
             self.curr += 1;
             var name: []const u8 = undefined;
-            switch (tok.tok) {
+            switch (tok) {
                 .Identifier => |str| name = str,
                 else => unreachable,
             }
@@ -513,7 +603,7 @@ pub const Parser = struct {
 
     fn block(self: *Self) ![]*Stmt {
         var stmts = std.ArrayList(*Stmt).init(self.alloc);
-        while (!self.match_any(&[_]TokenType{ .RightBrace, .Eof })) {
+        while (!self.match_any(&[_]Token.Type{ .RightBrace, .Eof })) {
             try stmts.append(try self.declaration());
         }
         if (!self.match_next(.RightBrace)) {
@@ -534,17 +624,6 @@ pub const Parser = struct {
         stmt.* = .{ .Print = val };
         return stmt;
     }
-
-    // fn expr_stmt(self: *Self) !*Stmt {
-    //     var val = try self.expression();
-    //     if (!self.match_next(.Semicolon)) {
-    //         return error.ExpectedSemicolon;
-    //     }
-    //     self.curr += 1;
-    //     var stmt = try self.alloc.create(Stmt);
-    //     stmt.* = .{ .Expr = val };
-    //     return stmt;
-    // }
 
     fn expression(self: *Self) anyerror!*Expr {
         return try self.logic_or();
@@ -584,11 +663,10 @@ pub const Parser = struct {
 
     fn equality(self: *Self) !*Expr {
         var left = try self.comparison();
-        while (self.match_any(&[_]TokenType{ .BangEqual, .DoubleEqual })) {
+        while (self.match_any(&[_]Token.Type{ .BangEqual, .DoubleEqual })) {
             var operator = self.tokens[self.curr];
 
             self.curr += 1;
-            // try self.nom();
 
             var right = try self.comparison();
             var stack_left = .{ .Binary = .{ .left = left, .operator = operator, .right = right } };
@@ -602,7 +680,7 @@ pub const Parser = struct {
     fn comparison(self: *Self) !*Expr {
         var left = try self.term();
 
-        while (self.match_any(&[_]TokenType{ .Gt, .Gte, .Lt, .Lte })) {
+        while (self.match_any(&[_]Token.Type{ .Gt, .Gte, .Lt, .Lte })) {
             var operator = self.tokens[self.curr];
 
             self.curr += 1;
@@ -619,11 +697,9 @@ pub const Parser = struct {
 
     fn term(self: *Self) !*Expr {
         var expr = try self.factor();
-        // std.debug.print("expr term {any} {} {any}\n", .{ expr, self.match_any(&[_]TokenType{ .Dash, .Plus }), self.tokens[self.curr] });
 
-        while (self.match_any(&[_]TokenType{ .Dash, .Plus })) {
+        while (self.match_any(&[_]Token.Type{ .Dash, .Plus })) {
             var operator = self.tokens[self.curr];
-            // std.debug.print("operator {any} \n", .{operator});
 
             self.curr += 1;
 
@@ -640,7 +716,7 @@ pub const Parser = struct {
     fn factor(self: *Self) !*Expr {
         var expr = try self.unary();
 
-        while (self.match_any(&[_]TokenType{ .Slash, .Star })) {
+        while (self.match_any(&[_]Token.Type{ .Slash, .Star })) {
             var operator = self.tokens[self.curr];
 
             self.curr += 1;
@@ -656,7 +732,7 @@ pub const Parser = struct {
     }
 
     fn unary(self: *Self) !*Expr {
-        if (self.match_any(&[_]TokenType{ .Bang, .Dash })) {
+        if (self.match_any(&[_]Token.Type{ .Bang, .Dash })) {
             var operator = self.tokens[self.curr];
             self.curr += 1;
 
@@ -682,10 +758,10 @@ pub const Parser = struct {
             } else if (self.match_next(.Dot)) {
                 self.curr += 1;
 
-                if (!self.match_next(.{ .Identifier = "" })) {
+                if (!self.match_next(.Identifier)) {
                     return error.ExpectedIdentifier;
                 }
-                var name = switch (self.tokens[self.curr].tok) {
+                var name = switch (self.tokens[self.curr]) {
                     .Identifier => |n| n,
                     else => unreachable,
                 };
@@ -744,7 +820,7 @@ pub const Parser = struct {
         var expr = try self.alloc.create(Expr);
         errdefer self.alloc.destroy(expr);
 
-        switch (tok.tok) {
+        switch (tok) {
             .False => expr.* = .{ .Literal = .False },
             .True => expr.* = .{ .Literal = .True },
             .None => expr.* = .{ .Literal = .None },
@@ -752,7 +828,7 @@ pub const Parser = struct {
             .String => |str| expr.* = .{ .Literal = .{ .String = str } },
             .LeftParen => {
                 expr = try self.expression();
-                if (self.tokens[self.curr].tok == .RightParen) {
+                if (self.tokens[self.curr] == .RightParen) {
                     self.curr += 1;
                 } else {
                     self.warn(tok, "expected right paren");
@@ -769,10 +845,10 @@ pub const Parser = struct {
                     return error.ExpectedDot;
                 }
                 self.curr += 1;
-                if (!self.match_next(.{ .Identifier = "" })) {
+                if (!self.match_next(.Identifier)) {
                     return error.ExpectedIdentifier;
                 }
-                var method = switch (self.tokens[self.curr].tok) {
+                var method = switch (self.tokens[self.curr]) {
                     .Identifier => |name| name,
                     else => unreachable,
                 };
@@ -789,7 +865,7 @@ pub const Parser = struct {
     }
 
     fn warn(_: *Self, tok: Token, message: []const u8) void {
-        std.log.warn("{} at '{any}' {s}\n", .{ tok.line, tok.tok, message });
+        std.log.warn("bad at '{any}' {s}\n", .{ tok, message });
     }
 
     fn synchronise(self: *Self) void {

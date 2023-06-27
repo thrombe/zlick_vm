@@ -3,10 +3,15 @@ const std = @import("std");
 const build_options = @import("build_options");
 const trace_enabled = build_options.trace_enable;
 
-const lexer = @import("lexer.zig");
-const Lexer = lexer.Lexer;
-const TokenInfo = lexer.TokenInfo;
-const Token = lexer.Token;
+const lexer_mod = @import("lexer.zig");
+const Lexer = lexer_mod.Lexer;
+const TokenInfo = lexer_mod.TokenInfo;
+const Token = lexer_mod.Token;
+
+const parser_mod = @import("parser.zig");
+const Parser = parser_mod.Parser;
+const Stmt = parser_mod.Stmt;
+const Expr = parser_mod.Expr;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -45,6 +50,8 @@ const Zlick = struct {
     alloc: std.mem.Allocator,
     chunk: *Chunk,
     vm: Vm,
+
+    had_err: bool = false,
 
     fn new(alloc: std.mem.Allocator) !Self {
         var chunk = try alloc.create(Chunk);
@@ -88,52 +95,45 @@ const Zlick = struct {
     }
 
     fn run(self: *Self, code: []const u8) !void {
+        var lexer = try Lexer.new(code, self.alloc);
+        defer lexer.deinit();
+
         var compiler = try Compiler.new(self.chunk, self.alloc);
         defer compiler.deinit();
 
-        try compiler.compile(code);
+        var tokens = std.ArrayList(Token).init(self.alloc);
+        while (try lexer.next()) |token| {
+            try tokens.append(token.tok);
+            // std.debug.print("{any}\n", .{token});
+        }
 
-        // var scanner = try Lexer.new(code, self.alloc);
-        // defer scanner.deinit();
+        var parser = Parser.new(tokens.toOwnedSlice(), self.alloc);
+        defer parser.deinit();
 
-        // var tokens = std.ArrayList(Token).init(self.alloc);
-        // while (try scanner.next()) |token| {
-        //     try tokens.append(token);
-        //     // std.debug.print("{any}\n", .{token});
-        // }
+        while (try parser.next_stmt()) |s| {
+            defer s.free(self.alloc);
 
-        // var parser = Parser.new(tokens.toOwnedSlice(), alloc);
-        // defer parser.deinit();
+            // std.debug.print("{any}\n", .{s});
 
-        // while (try parser.next_stmt()) |s| {
-        //     try temp.append(s);
+            if (self.had_err) {
+                continue;
+            }
 
-        //     // try printer.print_stmt(s);
+            var r = compiler.compile_stmt(s);
+            _ = r catch {};
 
-        //     resolver.resolve_stmt(s) catch |err| {
-        //         std.debug.print("{}\n", .{err});
-        //         self.had_err = true;
-        //         continue;
-        //     };
-
-        //     if (self.had_err) {
-        //         continue;
-        //     }
-
-        //     var r = interpreter.evaluate_stmt(s);
-
-        //     if (r) |res| {
-        //         switch (res) {
-        //             .Void => {},
-        //             .Continue => return error.BadContinue,
-        //             .Break => return error.BadBreak,
-        //             .Return => return error.BadReturn,
-        //         }
-        //     } else |err| {
-        //         std.debug.print("{}\n", .{err});
-        //         self.had_err = true;
-        //     }
-        // }
+            // if (r) |res| {
+            //     switch (res) {
+            //         .Void => {},
+            //         .Continue => return error.BadContinue,
+            //         .Break => return error.BadBreak,
+            //         .Return => return error.BadReturn,
+            //     }
+            // } else |err| {
+            //     std.debug.print("{}\n", .{err});
+            //     self.had_err = true;
+            // }
+        }
     }
 };
 
@@ -142,20 +142,6 @@ const Compiler = struct {
     const Error = error{
         UnexpectedEof,
         ExpectedEof,
-    };
-
-    const Precedence = enum {
-        None,
-        Assignment, // =
-        Or, // or
-        And, // and
-        Equality, // == !=
-        Comparison, // < > <= >=
-        Term, // + -
-        Factor, // * /
-        Unary, // ! -
-        Call, // . ()
-        Primary,
     };
 
     chunk: *Chunk,
@@ -175,33 +161,18 @@ const Compiler = struct {
         self.lexer.deinit();
     }
 
-    fn advance(self: *Self) !void {
-        self.prev = self.curr;
-
-        defer std.debug.print("{any}\n", .{self.curr.tok});
-
-        self.curr = try self.lexer.next() orelse return error.UnexpectedEof;
-    }
-
-    fn consume(self: *Self, typ: Token.Type, err: Self.Error) !void {
-        if (typ == self.curr.tok) {
-            try self.advance();
-        } else {
-            return err;
-        }
-    }
-
     fn write_instruction(self: *Self, inst: Instruction) !void {
         try self.chunk.write_instruction(inst, self.lexer.line);
     }
 
-    fn compile(self: *Self, code: []const u8) !void {
-        self.lexer.code(code);
+    fn compile_stmt(self: *Self, stmt: *Stmt) !void {
+        _ = self;
+        _ = stmt;
+    }
 
-        try self.advance();
-        // self.expression();
-        try self.consume(.Eof, error.ExpectedEof);
-        try self.write_instruction(.Return);
+    fn compile_expr(self: *Self, expr: *Expr) !void {
+        _ = self;
+        _ = expr;
     }
 };
 

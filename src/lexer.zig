@@ -177,6 +177,7 @@ pub const Lexer = struct {
 };
 
 pub const Token = union(enum) {
+    const Self = @This();
     pub const Type = std.meta.Tag(Token);
 
     LeftParen,
@@ -225,19 +226,19 @@ pub const Token = union(enum) {
     Print,
 
     Eof,
+
+    pub fn match(self: *Self, others: []const Token.Type) bool {
+        for (others) |typ| {
+            if (@as(Token.Type, self.*) == typ) {
+                return true;
+            }
+        }
+        return false;
+    }
 };
 
 pub const TokenInfo = struct {
     const Self = @This();
     tok: Token,
     line: u64,
-
-    fn match(self: *Self, others: []const Token.Type) bool {
-        for (others) |typ| {
-            if (@as(Token.Type, self.tok) == typ) {
-                return true;
-            }
-        }
-        return false;
-    }
 };
