@@ -6,7 +6,11 @@ pub const Instruction = union(enum) {
     Return,
     Call: u8,
     Constant: u8,
+    ConstNone,
+    ConstTrue,
+    ConstFalse,
     Negate,
+    LogicalNot,
     Add,
     Subtract,
     Multiply,
@@ -15,6 +19,57 @@ pub const Instruction = union(enum) {
 
 pub const Opcode = std.meta.Tag(Instruction);
 
+pub const Value = union(enum) {
+    const Self = @This();
+    pub const Error = error{
+        NotNumber,
+        NotBoolean,
+        NotNone,
+    };
+    pub const Type = std.meta.Tag(Self);
+
+    Number: f64,
+    Bool: bool,
+    None,
+
+    pub fn new(val: anytype) Self {
+        const t = comptime @TypeOf(val);
+        return switch (t) {
+            f64 => .{ .Number = val },
+            bool => .{ .Bool = val },
+            @TypeOf(null) => .None,
+            else => {
+                @compileLog("type passed => ", t);
+                @compileError("cannot represent as a Value!");
+            },
+        };
+    }
+
+    pub fn is(self: *Self, typ: Self.Type) bool {
+        return typ == self.*;
+    }
+
+    pub fn as(self: *Self, comptime typ: Self.Type) !switch (typ) {
+        .Number => f64,
+        .Bool => bool,
+        .None => void,
+    } {
+        if (self.is(typ)) {
+            return switch (typ) {
+                .Number => self.Number,
+                .Bool => self.Bool,
+                .None => {},
+            };
+        } else {
+            return switch (typ) {
+                .Number => error.NotNumber,
+                .Bool => error.NotBoolean,
+                .None => error.NotNone,
+            };
+        }
+    }
+};
+
 pub const Chunk = struct {
     const Self = @This();
     pub const Error = error{
@@ -22,7 +77,7 @@ pub const Chunk = struct {
     };
 
     const ByteList = std.ArrayListUnmanaged(u8);
-    const ConstantList = std.ArrayListUnmanaged(f64);
+    const ConstantList = std.ArrayListUnmanaged(Value);
     const LineInfo = struct {
         line: usize,
         bytes: usize,
@@ -52,7 +107,7 @@ pub const Chunk = struct {
         };
     }
 
-    pub fn write_constant(self: *Self, constant: f64) !u8 {
+    pub fn write_constant(self: *Self, constant: Value) !u8 {
         try self.consts.append(self.alloc, constant);
         return @intCast(u8, self.consts.items.len - 1);
     }

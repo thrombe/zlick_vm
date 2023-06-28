@@ -57,18 +57,21 @@ pub const Compiler = struct {
             .Literal => |val| {
                 switch (val) {
                     .Number => |str| {
-                        const index = try self.chunk.write_constant(try std.fmt.parseFloat(f64, str));
+                        const num = try std.fmt.parseFloat(f64, str);
+                        const index = try self.chunk.write_constant(.{ .Number = num });
                         try self.write_instruction(.{ .Constant = index });
                     },
+                    .None => try self.write_instruction(.ConstNone),
+                    .True => try self.write_instruction(.ConstTrue),
+                    .False => try self.write_instruction(.ConstFalse),
                     else => return error.Unimplemented,
                 }
             },
             .Unary => |val| {
                 try self.compile_expr(val.oparand);
                 switch (val.operator) {
-                    .Dash => {
-                        try self.write_instruction(.Negate);
-                    },
+                    .Dash => try self.write_instruction(.Negate),
+                    .Bang => try self.write_instruction(.LogicalNot),
                     else => return error.BadUnaryOperator,
                 }
             },
