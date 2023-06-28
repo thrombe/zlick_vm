@@ -22,9 +22,170 @@ pub const Instruction = union(enum) {
 
 pub const Opcode = std.meta.Tag(Instruction);
 
+// all this stuff allows all objects to have their own size in heap
+// an union consumes the max of it's possible varients always. but in this case - it does not need to
+// for example:
+// assume a type S which takes 50 bytes and another type T which takes 8 bytes
+// each of these types can be allocated on the heap with their size.
+// then - the pointers to Object can be stored anywhere in the program (which is a field of both S and T)
+// and we can cast *Object to *S or *T as required
+pub const Object = struct {
+    const Self = @This();
+    pub const Error = error{
+        BadObjectCast,
+    };
+    pub const Tag = enum(u8) {
+        String,
+    };
+
+    tag: Tag,
+
+    fn tag_to_type(comptime tag: Tag) type {
+        return switch (tag) {
+            .String => String,
+        };
+    }
+
+    pub fn as(self: *Self, comptime tag: Tag) !*tag_to_type(tag) {
+        if (self.tag != tag) {
+            return error.BadObjectCast;
+        } else {
+            return @fieldParentPtr(tag_to_type(tag), "tag", self);
+        }
+    }
+
+    pub fn is(self: *Self, tag: Tag) bool {
+        return self.tag == tag;
+    }
+
+    pub fn eq(self: *Self, other: *Self) !bool {
+        if (other.is(self.tag)) {
+            inline for (.{.String}) |t| {
+                if (self.is(t)) {
+                    const a = self.as(t) catch unreachable;
+                    const b = other.as(t) catch unreachable;
+                    return a.inner.eq(&b.inner);
+                }
+            }
+            unreachable;
+        } else {
+            return error.CannotCompareValues;
+        }
+    }
+
+    pub fn gt(self: *Self, other: *Self) !bool {
+        if (other.is(self.tag)) {
+            inline for (.{.String}) |t| {
+                if (self.is(t)) {
+                    const a = self.as(t) catch unreachable;
+                    const b = other.as(t) catch unreachable;
+                    return a.inner.gt(&b.inner);
+                }
+            }
+            unreachable;
+        } else {
+            return error.CannotCompareValues;
+        }
+    }
+
+    pub fn lt(self: *Self, other: *Self) !bool {
+        if (other.is(self.tag)) {
+            inline for (.{.String}) |t| {
+                if (self.is(t)) {
+                    const a = self.as(t) catch unreachable;
+                    const b = other.as(t) catch unreachable;
+                    return a.inner.lt(&b.inner);
+                }
+            }
+            unreachable;
+        } else {
+            return error.CannotCompareValues;
+        }
+    }
+};
+
+// this allows the new object declarations to always comply to the assumptions made in methods in Object
+// and always initialise with the correct stuff
+// this also allows to define methods on all custom objects at once (don't know how useful that will be :P)
+pub fn new_object(comptime tag: Object.Tag, comptime val: type) type {
+    return struct {
+        const Self = @This();
+        pub const Inner = val;
+
+        tag: Object = .{ .tag = tag },
+        inner: Inner,
+
+        pub fn new(inner: Inner) Self {
+            return .{ .inner = inner };
+        }
+    };
+}
+
+pub const String = new_object(.String, struct {
+    const Self = @This();
+
+    str: []const u8,
+
+    fn eq(self: *Self, other: *Self) bool {
+        return std.mem.eql(u8, self.str, other.str);
+    }
+
+    fn gt(self: *Self, other: *Self) bool {
+        const len = std.math.min(self.str.len, other.str.len);
+
+        for (self.str[0..len]) |c, i| {
+            if (c > other.str[i]) {
+                return true;
+            } else if (c < other.str[i]) {
+                return false;
+            }
+        }
+
+        return self.str.len > other.str.len;
+    }
+
+    fn lt(self: *Self, other: *Self) bool {
+        const len = std.math.min(self.str.len, other.str.len);
+
+        for (self.str[0..len]) |c, i| {
+            if (c > other.str[i]) {
+                return false;
+            } else if (c < other.str[i]) {
+                return true;
+            }
+        }
+
+        return self.str.len < other.str.len;
+    }
+});
+
+test "object tests" {
+    const dbg = std.debug.print;
+    const alloc = std.testing.allocator_instance.allocator();
+    const p = alloc;
+    _ = p;
+
+    var obj: Object = .{ .tag = .String };
+    var lol = try obj.as(.String);
+    lol = try alloc.create(String);
+    defer alloc.destroy(lol);
+    lol.* = String.new(.{ .str = "adsas" });
+
+    var o = String.new(.{ .str = "adsas" });
+    var o2 = &o.tag;
+    var o1 = &lol.tag;
+
+    dbg("{any}\n", .{@sizeOf(String)});
+    dbg("{any}\n", .{Object.Tag});
+    dbg("{*}\n", .{try obj.as(.String)});
+    dbg("{any}\n", .{lol});
+    dbg("{any}\n", .{o1.eq(o2)});
+}
+
 pub const Value = union(enum) {
     const Self = @This();
     pub const Error = error{
+        NotObject,
         NotNumber,
         NotBoolean,
         NotNone,
@@ -32,6 +193,7 @@ pub const Value = union(enum) {
     };
     pub const Tag = std.meta.Tag(Self);
 
+    Object: *Object,
     Number: f64,
     Bool: bool,
     None,
@@ -39,9 +201,11 @@ pub const Value = union(enum) {
     pub fn new(val: anytype) Self {
         const t = comptime @TypeOf(val);
         return switch (t) {
+            *Object => .{ .Object = val },
             f64 => .{ .Number = val },
             bool => .{ .Bool = val },
             @TypeOf(null) => .None,
+            Self => return val,
             else => {
                 @compileLog("type passed => ", t);
                 @compileError("cannot represent as a Value!");
@@ -54,18 +218,21 @@ pub const Value = union(enum) {
     }
 
     pub fn as(self: *const Self, comptime typ: Self.Tag) !switch (typ) {
+        .Object => *Object,
         .Number => f64,
         .Bool => bool,
         .None => void,
     } {
         if (self.is(typ)) {
             return switch (typ) {
+                .Object => self.Object,
                 .Number => self.Number,
                 .Bool => self.Bool,
                 .None => {},
             };
         } else {
             return switch (typ) {
+                .Object => error.NotObject,
                 .Number => error.NotNumber,
                 .Bool => error.NotBoolean,
                 .None => error.NotNone,
@@ -83,6 +250,7 @@ pub const Value = union(enum) {
         }
 
         switch (self.*) {
+            .Object => |val| return try val.eq(try other.as(.Object)),
             .Number => |val| return val == try other.as(.Number),
             .Bool => |val| return val == try other.as(.Bool),
             .None => return true,
@@ -95,6 +263,7 @@ pub const Value = union(enum) {
         }
 
         switch (self.*) {
+            .Object => |val| return try val.gt(try other.as(.Object)),
             .Number => |val| return val > try other.as(.Number),
             .Bool => return error.CannotCompareValues,
             .None => return error.CannotCompareValues,
@@ -107,6 +276,7 @@ pub const Value = union(enum) {
         }
 
         switch (self.*) {
+            .Object => |val| return try val.lt(try other.as(.Object)),
             .Number => |val| return val < try other.as(.Number),
             .Bool => return error.CannotCompareValues,
             .None => return error.CannotCompareValues,

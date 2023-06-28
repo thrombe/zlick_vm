@@ -57,8 +57,7 @@ pub const Vm = struct {
                 },
                 .Constant => |index| {
                     var val = self.chunk.consts.items[index];
-                    const num = try val.as(.Number);
-                    try self.push_value(num);
+                    try self.push_value(val);
                 },
                 .ConstNone => try self.push_value(null),
                 .ConstTrue => try self.push_value(true),

@@ -64,7 +64,12 @@ pub const Compiler = struct {
                     .None => try self.write_instruction(.ConstNone),
                     .True => try self.write_instruction(.ConstTrue),
                     .False => try self.write_instruction(.ConstFalse),
-                    else => return error.Unimplemented,
+                    .String => |str| {
+                        var obj = try self.chunk.alloc.create(code_mod.String);
+                        obj.* = code_mod.String.new(.{ .str = str });
+                        const s = try self.chunk.write_constant(.{ .Object = &obj.tag });
+                        try self.write_instruction(.{ .Constant = s });
+                    },
                 }
             },
             .Unary => |val| {
