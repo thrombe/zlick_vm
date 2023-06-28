@@ -15,6 +15,9 @@ pub const Instruction = union(enum) {
     Subtract,
     Multiply,
     Divide,
+    Equal,
+    GreaterThan,
+    LessThan,
 };
 
 pub const Opcode = std.meta.Tag(Instruction);
@@ -25,8 +28,9 @@ pub const Value = union(enum) {
         NotNumber,
         NotBoolean,
         NotNone,
+        CannotCompareValues,
     };
-    pub const Type = std.meta.Tag(Self);
+    pub const Tag = std.meta.Tag(Self);
 
     Number: f64,
     Bool: bool,
@@ -45,11 +49,11 @@ pub const Value = union(enum) {
         };
     }
 
-    pub fn is(self: *Self, typ: Self.Type) bool {
+    pub fn is(self: *const Self, typ: Self.Tag) bool {
         return typ == self.*;
     }
 
-    pub fn as(self: *Self, comptime typ: Self.Type) !switch (typ) {
+    pub fn as(self: *const Self, comptime typ: Self.Tag) !switch (typ) {
         .Number => f64,
         .Bool => bool,
         .None => void,
@@ -66,6 +70,46 @@ pub const Value = union(enum) {
                 .Bool => error.NotBoolean,
                 .None => error.NotNone,
             };
+        }
+    }
+
+    pub fn tag(self: *const Self) Self.Tag {
+        return std.meta.activeTag(self.*);
+    }
+
+    pub fn eq(self: *const Self, other: Self) !bool {
+        if (self.tag() != other) {
+            return false;
+        }
+
+        switch (self.*) {
+            .Number => |val| return val == try other.as(.Number),
+            .Bool => |val| return val == try other.as(.Bool),
+            .None => return true,
+        }
+    }
+
+    pub fn gt(self: *const Self, other: Self) !bool {
+        if (self.tag() != other) {
+            return error.CannotCompareValues;
+        }
+
+        switch (self.*) {
+            .Number => |val| return val > try other.as(.Number),
+            .Bool => return error.CannotCompareValues,
+            .None => return error.CannotCompareValues,
+        }
+    }
+
+    pub fn lt(self: *const Self, other: Self) !bool {
+        if (self.tag() != other) {
+            return error.CannotCompareValues;
+        }
+
+        switch (self.*) {
+            .Number => |val| return val < try other.as(.Number),
+            .Bool => return error.CannotCompareValues,
+            .None => return error.CannotCompareValues,
         }
     }
 };

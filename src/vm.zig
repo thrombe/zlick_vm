@@ -73,6 +73,21 @@ pub const Vm = struct {
                     const b = try val.as(.Bool);
                     try self.push_value(!b);
                 },
+                .Equal => {
+                    var v1 = try self.pop_value();
+                    var v2 = try self.pop_value();
+                    try self.push_value(try v2.eq(v1));
+                },
+                .GreaterThan => {
+                    var v1 = try self.pop_value();
+                    var v2 = try self.pop_value();
+                    try self.push_value(try v2.gt(v1));
+                },
+                .LessThan => {
+                    var v1 = try self.pop_value();
+                    var v2 = try self.pop_value();
+                    try self.push_value(try v2.lt(v1));
+                },
                 .Add => {
                     var v1 = try self.pop_value();
                     var v2 = try self.pop_value();

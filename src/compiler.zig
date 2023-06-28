@@ -79,17 +79,24 @@ pub const Compiler = struct {
                 try self.compile_expr(val.left);
                 try self.compile_expr(val.right);
                 switch (val.operator) {
-                    .Plus => {
-                        try self.write_instruction(.Add);
+                    .Plus => try self.write_instruction(.Add),
+                    .Dash => try self.write_instruction(.Subtract),
+                    .Star => try self.write_instruction(.Multiply),
+                    .Slash => try self.write_instruction(.Divide),
+                    .Gt => try self.write_instruction(.GreaterThan),
+                    .Lt => try self.write_instruction(.LessThan),
+                    .DoubleEqual => try self.write_instruction(.Equal),
+                    .BangEqual => {
+                        try self.write_instruction(.Equal);
+                        try self.write_instruction(.LogicalNot);
                     },
-                    .Dash => {
-                        try self.write_instruction(.Subtract);
+                    .Gte => {
+                        try self.write_instruction(.LessThan);
+                        try self.write_instruction(.LogicalNot);
                     },
-                    .Star => {
-                        try self.write_instruction(.Multiply);
-                    },
-                    .Slash => {
-                        try self.write_instruction(.Divide);
+                    .Lte => {
+                        try self.write_instruction(.GreaterThan);
+                        try self.write_instruction(.LogicalNot);
                     },
                     else => return error.BadBinaryOperator,
                 }
