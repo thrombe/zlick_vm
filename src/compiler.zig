@@ -22,12 +22,6 @@ pub const Compiler = struct {
 
     chunk: *Chunk,
 
-    had_error: bool = false,
-    panic_mode: bool = false,
-
-    prev: TokenInfo = undefined,
-    curr: TokenInfo = undefined,
-
     pub fn new(chunk: *Chunk) !Self {
         return .{ .chunk = chunk };
     }
