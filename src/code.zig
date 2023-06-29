@@ -20,9 +20,12 @@ pub const Instruction = union(enum) {
     GreaterThan,
     LessThan,
     Pop,
+    PopN: ConstantRef,
     DefineGlobal: ConstantRef,
     GetGlobal: ConstantRef,
     SetGlobal: ConstantRef,
+    GetLocal: ConstantRef,
+    SetLocal: ConstantRef,
 
     Print,
 };

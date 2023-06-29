@@ -73,6 +73,12 @@ pub const Vm = struct {
                 .Pop => {
                     _ = try self.pop_value();
                 },
+                .PopN => |count| {
+                    var i = count;
+                    while (i != 0) : (i -= 1) {
+                        _ = try self.pop_value();
+                    }
+                },
                 .DefineGlobal => |c| {
                     var val = self.chunk.consts.items[c];
                     var str = try val.as_obj(.String);
@@ -90,6 +96,8 @@ pub const Vm = struct {
                     var val = self.globals.getPtr(name.str) orelse return error.UndefinedVariable;
                     val.* = try self.pop_value();
                 },
+                .GetLocal => |i| try self.push_value(self.stack[i]),
+                .SetLocal => |i| self.stack[i] = try self.pop_value(),
                 .Print => {
                     var val = try self.pop_value();
                     const print = std.debug.print;

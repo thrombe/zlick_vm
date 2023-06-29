@@ -18,16 +18,81 @@ pub const Compiler = struct {
         Unimplemented,
         BadUnaryOperator,
         BadBinaryOperator,
+        UndefinedVariable,
     };
 
     chunk: *Chunk,
+    locals: LocalMan,
+
+    const LocalMan = struct {
+        const LocalsList = std.ArrayList(Local);
+        locals: LocalsList,
+        curr_scope: u32 = 0,
+
+        fn new(alloc: std.mem.Allocator) LocalMan {
+            return .{ .locals = LocalsList.init(alloc) };
+        }
+
+        fn deinit(self: *LocalMan) void {
+            self.locals.deinit();
+        }
+
+        fn define(self: *LocalMan, name: []const u8) !void {
+            try self.locals.append(.{ .name = name, .depth = self.curr_scope });
+        }
+
+        fn resolve(self: *LocalMan, name: []const u8) ?u8 {
+            for (self.locals.items) |_, i| {
+                const j = self.locals.items.len - i - 1;
+                const val = self.locals.items[j];
+                if (std.mem.eql(u8, val.name, name)) {
+                    return @intCast(u8, j);
+                }
+            }
+
+            return null;
+        }
+
+        fn begin_scope(self: *LocalMan) void {
+            self.curr_scope += 1;
+        }
+
+        fn end_scope(self: *LocalMan) u8 {
+            self.curr_scope -= 1;
+
+            var count: u8 = 0;
+            for (self.locals.items) |_| {
+                const j = self.locals.items.len - 1;
+                const val = self.locals.items[j];
+                if (val.depth == self.curr_scope) {
+                    break;
+                }
+                _ = self.locals.pop();
+                count += 1;
+            }
+            // while (self.locals.popOrNull()) |v| {
+            //     if (v.depth == self.curr_scope) {
+            //         try self.locals.append(v);
+            //         break;
+            //     }
+            //     count += 1;
+            // }
+
+            return count;
+        }
+    };
+
+    const Local = struct {
+        name: []const u8,
+        depth: u32,
+    };
 
     pub fn new(chunk: *Chunk) !Self {
-        return .{ .chunk = chunk };
+        return .{ .chunk = chunk, .locals = LocalMan.new(chunk.alloc) };
     }
 
     pub fn deinit(self: *Self) void {
-        _ = self;
+        self.locals.deinit();
     }
 
     fn write_instruction(self: *Self, inst: Instruction) !void {
@@ -51,18 +116,44 @@ pub const Compiler = struct {
                     try self.write_instruction(.ConstNone);
                 }
 
-                var obj = try self.chunk.alloc.create(code_mod.String);
-                obj.* = code_mod.String.new(.{ .str = val.name });
-                const s = try self.chunk.write_constant(.{ .Object = &obj.tag });
-                try self.write_instruction(.{ .DefineGlobal = s });
+                if (self.locals.curr_scope == 0) {
+                    var obj = try self.chunk.alloc.create(code_mod.String);
+                    obj.* = code_mod.String.new(.{ .str = val.name });
+                    const s = try self.chunk.write_constant(.{ .Object = &obj.tag });
+
+                    try self.write_instruction(.{ .DefineGlobal = s });
+                } else {
+                    try self.locals.define(val.name);
+                    // variable is implicitly 'set'
+                }
             },
             .Assign => |val| {
                 try self.compile_expr(val.expr);
 
-                var obj = try self.chunk.alloc.create(code_mod.String);
-                obj.* = code_mod.String.new(.{ .str = val.name });
-                const s = try self.chunk.write_constant(.{ .Object = &obj.tag });
-                try self.write_instruction(.{ .SetGlobal = s });
+                if (self.locals.curr_scope == 0) {
+                    var obj = try self.chunk.alloc.create(code_mod.String);
+                    obj.* = code_mod.String.new(.{ .str = val.name });
+                    const s = try self.chunk.write_constant(.{ .Object = &obj.tag });
+
+                    try self.write_instruction(.{ .SetGlobal = s });
+                } else {
+                    if (self.locals.resolve(val.name)) |i| {
+                        try self.write_instruction(.{ .SetLocal = i });
+                    } else {
+                        return error.UndefinedVariable;
+                    }
+                }
+            },
+            .Block => |val| {
+                self.locals.begin_scope();
+                defer {
+                    const num = self.locals.end_scope();
+                    self.write_instruction(.{ .PopN = num }) catch unreachable;
+                }
+
+                for (val) |s| {
+                    try self.compile_stmt(s);
+                }
             },
             else => return error.Unimplemented,
         }
@@ -82,8 +173,10 @@ pub const Compiler = struct {
                     .False => try self.write_instruction(.ConstFalse),
                     .String => |str| {
                         var obj = try self.chunk.alloc.create(code_mod.String);
+
                         obj.* = code_mod.String.new(.{ .str = str });
                         const s = try self.chunk.write_constant(.{ .Object = &obj.tag });
+
                         try self.write_instruction(.{ .Constant = s });
                     },
                 }
@@ -127,9 +220,15 @@ pub const Compiler = struct {
             },
             .Variable => |val| {
                 var obj = try self.chunk.alloc.create(code_mod.String);
-                obj.* = code_mod.String.new(.{ .str = val });
-                const s = try self.chunk.write_constant(.{ .Object = &obj.tag });
-                try self.write_instruction(.{ .GetGlobal = s });
+
+                if (self.locals.curr_scope == 0) {
+                    obj.* = code_mod.String.new(.{ .str = val });
+                    const s = try self.chunk.write_constant(.{ .Object = &obj.tag });
+
+                    try self.write_instruction(.{ .GetGlobal = s });
+                } else {
+                    try self.write_instruction(.{ .GetLocal = self.locals.resolve(val) orelse return error.UndefinedVariable });
+                }
             },
             else => return error.Unimplemented,
         }
