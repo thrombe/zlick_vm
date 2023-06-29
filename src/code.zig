@@ -40,18 +40,13 @@ pub const Instruction = union(enum) {
     Print,
 
     pub fn size(opcode: Opcode) usize {
-        inline for (std.meta.tags(Opcode)) |tag, i| {
-            if (comptime tag == opcode) {
-                const name = comptime std.meta.fieldNames(Opcode)[i];
-                @setEvalBranchQuota(2000);
-                const field_index = comptime std.meta.fieldIndex(Instruction, name).?;
-                const field = comptime std.meta.fields(Instruction)[field_index];
-                const payload_type = comptime field.field_type;
+        switch (opcode) {
+            inline else => |tag| {
+                const payload_type = comptime std.meta.TagPayload(Self, tag);
                 const payload_size = comptime @sizeOf(payload_type);
                 return payload_size + 1;
-            }
+            },
         }
-        unreachable;
     }
 };
 
@@ -404,15 +399,12 @@ pub const Chunk = struct {
         }
         self.code.items[pos] = opcode;
 
-        inline for (std.meta.tags(Opcode)) |tag, i| {
-            if (tag == inst) {
-                const name = comptime std.meta.fieldNames(Opcode)[i];
-                const payload = comptime @field(inst, name);
-
+        switch (inst) {
+            inline else => |payload| {
                 for (std.mem.asBytes(&payload)) |byte, j| {
                     self.code.items[pos + 1 + j] = byte;
                 }
-            }
+            },
         }
     }
 
@@ -430,16 +422,13 @@ pub const Chunk = struct {
             info = &self.line_nos.items[self.line_nos.items.len - 1];
         }
 
-        inline for (std.meta.tags(Opcode)) |tag, i| {
-            if (tag == inst) {
-                const name = comptime std.meta.fieldNames(Opcode)[i];
-                const payload = comptime @field(inst, name);
-
+        switch (inst) {
+            inline else => |payload| {
                 const payload_size = comptime @sizeOf(@TypeOf(payload));
                 info.bytes += payload_size + 1;
 
                 try self.code.appendSlice(self.alloc, std.mem.asBytes(&payload));
-            }
+            },
         }
     }
 
@@ -494,13 +483,10 @@ pub const ChunkReader = struct {
 
         var inst: Instruction = undefined;
 
-        inline for (std.meta.tags(Opcode)) |tag, i| {
-            if (tag == opcode) {
-                const name = comptime std.meta.fieldNames(Opcode)[i];
-                @setEvalBranchQuota(2000);
-                const field_index = comptime std.meta.fieldIndex(Instruction, name).?;
-                const field = comptime std.meta.fields(Instruction)[field_index];
-                const payload_type = comptime field.field_type;
+        switch (opcode) {
+            inline else => |tag| {
+                const name = comptime std.meta.tagName(tag);
+                const payload_type = comptime std.meta.TagPayload(Instruction, tag);
                 const payload_size = comptime @sizeOf(payload_type);
 
                 if (payload_size > 0) {
@@ -516,7 +502,7 @@ pub const ChunkReader = struct {
                 } else {
                     inst = @unionInit(Instruction, name, {});
                 }
-            }
+            },
         }
 
         return inst;
@@ -560,10 +546,9 @@ pub const Disassembler = struct {
         print("{:4} ", .{try self.chunk.get_line_number(start)});
         print("{:5} ", .{start});
 
-        inline for (std.meta.tags(Opcode)) |tag, i| {
-            if (tag == inst) {
-                const name = comptime std.meta.fieldNames(Opcode)[i];
-                const payload = comptime @field(inst, name);
+        switch (inst) {
+            inline else => |payload, tag| {
+                const name = comptime std.meta.tagName(tag);
                 const payload_size = comptime @sizeOf(@TypeOf(payload));
 
                 print("{s:<10} ", .{name});
@@ -591,7 +576,7 @@ pub const Disassembler = struct {
                         else => {},
                     }
                 }
-            }
+            },
         }
 
         print("\n", .{});
