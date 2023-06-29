@@ -226,6 +226,35 @@ pub const Compiler = struct {
                 }
             },
             .Binary => |val| {
+                switch (val.operator) {
+                    .And => {
+                        try self.compile_expr(val.left);
+
+                        const skip_jmp = self.chunk.code.items.len;
+                        try self.write_instruction(.{ .JmpIfFalse = 0 });
+                        try self.write_instruction(.Pop);
+
+                        try self.compile_expr(val.right);
+
+                        try self.patch_jmp(.JmpIfFalse, skip_jmp);
+
+                        return;
+                    },
+                    .Or => {
+                        try self.compile_expr(val.left);
+
+                        const skip_jmp = self.chunk.code.items.len;
+                        try self.write_instruction(.{ .JmpIfTrue = 0 });
+                        try self.write_instruction(.Pop);
+
+                        try self.compile_expr(val.right);
+
+                        try self.patch_jmp(.JmpIfTrue, skip_jmp);
+
+                        return;
+                    },
+                    else => {},
+                }
                 try self.compile_expr(val.left);
                 try self.compile_expr(val.right);
                 switch (val.operator) {

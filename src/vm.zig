@@ -167,6 +167,12 @@ pub const Vm = struct {
                         reader.curr += offset;
                     }
                 },
+                .JmpIfTrue => |offset| {
+                    var condition = try self.peek_value();
+                    if (try condition.as(.Bool)) {
+                        reader.curr += offset;
+                    }
+                },
                 .Jmp => |offset| {
                     reader.curr += offset;
                 },

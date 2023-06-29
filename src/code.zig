@@ -33,6 +33,7 @@ pub const Instruction = union(enum) {
     SetLocal: ConstantRef,
 
     JmpIfFalse: JmpOffset,
+    JmpIfTrue: JmpOffset,
     Jmp: JmpOffset,
 
     Print,
@@ -494,6 +495,7 @@ pub const ChunkReader = struct {
         inline for (std.meta.tags(Opcode)) |tag, i| {
             if (tag == opcode) {
                 const name = comptime std.meta.fieldNames(Opcode)[i];
+                @setEvalBranchQuota(2000);
                 const field_index = comptime std.meta.fieldIndex(Instruction, name).?;
                 const field = comptime std.meta.fields(Instruction)[field_index];
                 const payload_type = comptime field.field_type;
