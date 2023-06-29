@@ -35,6 +35,7 @@ pub const Instruction = union(enum) {
     JmpIfFalse: JmpOffset,
     JmpIfTrue: JmpOffset,
     Jmp: JmpOffset,
+    Loop: JmpOffset,
 
     Print,
 
@@ -42,6 +43,7 @@ pub const Instruction = union(enum) {
         inline for (std.meta.tags(Opcode)) |tag, i| {
             if (comptime tag == opcode) {
                 const name = comptime std.meta.fieldNames(Opcode)[i];
+                @setEvalBranchQuota(2000);
                 const field_index = comptime std.meta.fieldIndex(Instruction, name).?;
                 const field = comptime std.meta.fields(Instruction)[field_index];
                 const payload_type = comptime field.field_type;

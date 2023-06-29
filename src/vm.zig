@@ -176,6 +176,9 @@ pub const Vm = struct {
                 .Jmp => |offset| {
                     reader.curr += offset;
                 },
+                .Loop => |offset| {
+                    reader.curr -= offset;
+                },
             }
         }
 

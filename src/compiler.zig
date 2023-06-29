@@ -191,6 +191,23 @@ pub const Compiler = struct {
 
                 try self.patch_jmp(.Jmp, else_jmp);
             },
+            .While => |val| {
+                const loop_start = self.chunk.code.items.len;
+                try self.compile_expr(val.condition);
+
+                const skip = self.chunk.code.items.len;
+                try self.write_instruction(.{ .JmpIfFalse = 0 });
+
+                try self.write_instruction(.Pop);
+                try self.compile_stmt(val.block);
+
+                try self.write_instruction(.{
+                    .Loop = @intCast(std.meta.TagPayload(Instruction, .Loop), self.chunk.code.items.len - loop_start + 3),
+                });
+
+                try self.patch_jmp(.JmpIfFalse, skip);
+                try self.write_instruction(.Pop);
+            },
             else => return error.Unimplemented,
         }
     }
