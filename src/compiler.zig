@@ -109,9 +109,23 @@ pub const Compiler = struct {
 
         const offset = target - pos - Instruction.size(opcode);
         try self.edit_instruction(
-            @unionInit(Instruction, @tagName(opcode), @intCast(std.meta.TagPayload(Instruction, opcode), offset)),
+            @unionInit(
+                Instruction,
+                @tagName(opcode),
+                @intCast(std.meta.TagPayload(Instruction, opcode), offset),
+            ),
             pos,
         );
+    }
+
+    fn loop_to(self: *Self, pos: usize) !void {
+        const inst: Opcode = .Loop;
+        const offset = self.chunk.code.items.len - pos + Instruction.size(inst);
+        try self.write_instruction(@unionInit(
+            Instruction,
+            @tagName(inst),
+            @intCast(std.meta.TagPayload(Instruction, inst), offset),
+        ));
     }
 
     pub fn compile_stmt(self: *Self, stmt: *Stmt) !void {
@@ -201,12 +215,42 @@ pub const Compiler = struct {
                 try self.write_instruction(.Pop);
                 try self.compile_stmt(val.block);
 
-                try self.write_instruction(.{
-                    .Loop = @intCast(std.meta.TagPayload(Instruction, .Loop), self.chunk.code.items.len - loop_start + 3),
-                });
+                try self.loop_to(loop_start);
 
                 try self.patch_jmp(.JmpIfFalse, skip);
                 try self.write_instruction(.Pop);
+            },
+            .For => |val| {
+                self.locals.begin_scope();
+                defer {
+                    const num = self.locals.end_scope();
+                    self.write_instruction(.{ .PopN = num }) catch unreachable;
+                }
+
+                if (val.start) |start| {
+                    try self.compile_stmt(start);
+                }
+                const loop_start = self.chunk.code.items.len;
+                var end_jmp: ?usize = null;
+
+                if (val.mid) |mid| {
+                    try self.compile_expr(mid);
+                    end_jmp = self.chunk.code.items.len;
+                    try self.write_instruction(.{ .JmpIfFalse = 0 });
+                    try self.write_instruction(.Pop);
+                }
+
+                try self.compile_stmt(val.block);
+                if (val.end) |end| {
+                    try self.compile_stmt(end);
+                }
+
+                try self.loop_to(loop_start);
+
+                if (end_jmp) |end| {
+                    try self.patch_jmp(.JmpIfFalse, end);
+                    try self.write_instruction(.Pop);
+                }
             },
             else => return error.Unimplemented,
         }
