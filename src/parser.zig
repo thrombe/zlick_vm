@@ -665,11 +665,11 @@ pub const Parser = struct {
         var expr = try self.logic_and();
         errdefer expr.free(self.alloc);
 
-        while (self.match_next(.Or)) {
+        if (self.match_next(.Or)) {
             var operator = self.tokens[self.curr];
             self.curr += 1;
 
-            var right = try self.logic_and();
+            var right = try self.logic_or();
             var stack_expr = .{ .Binary = .{ .left = expr, .operator = operator, .right = right } };
             expr = try self.alloc.create(Expr);
             expr.* = stack_expr;
@@ -682,11 +682,11 @@ pub const Parser = struct {
         var expr = try self.equality();
         errdefer expr.free(self.alloc);
 
-        while (self.match_next(.And)) {
+        if (self.match_next(.And)) {
             var operator = self.tokens[self.curr];
             self.curr += 1;
 
-            var right = try self.equality();
+            var right = try self.logic_and();
             var stack_expr = .{ .Binary = .{ .left = expr, .operator = operator, .right = right } };
             expr = try self.alloc.create(Expr);
             expr.* = stack_expr;
