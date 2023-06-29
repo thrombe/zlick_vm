@@ -18,6 +18,9 @@ pub const Instruction = union(enum) {
     Equal,
     GreaterThan,
     LessThan,
+    Pop,
+
+    Print,
 };
 
 pub const Opcode = std.meta.Tag(Instruction);
@@ -49,6 +52,14 @@ pub const Object = struct {
     pub fn as(self: *Self, comptime tag: Tag) !*tag_to_type(tag) {
         if (self.tag != tag) {
             return error.BadObjectCast;
+        } else {
+            return @fieldParentPtr(tag_to_type(tag), "tag", self);
+        }
+    }
+
+    pub fn try_as(self: *Self, comptime tag: Tag) ?*tag_to_type(tag) {
+        if (self.tag != tag) {
+            return null;
         } else {
             return @fieldParentPtr(tag_to_type(tag), "tag", self);
         }
@@ -102,6 +113,14 @@ pub const Object = struct {
             return error.CannotCompareValues;
         }
     }
+
+    pub fn print(self: *Self) void {
+        inline for (.{.String}) |t| {
+            if (self.try_as(t)) |v| {
+                return v.inner.print();
+            }
+        }
+    }
 };
 
 // this allows the new object declarations to always comply to the assumptions made in methods in Object
@@ -126,11 +145,11 @@ pub const String = new_object(.String, struct {
 
     str: []const u8,
 
-    fn eq(self: *Self, other: *Self) bool {
+    fn eq(self: *const Self, other: *const Self) bool {
         return std.mem.eql(u8, self.str, other.str);
     }
 
-    fn gt(self: *Self, other: *Self) bool {
+    fn gt(self: *const Self, other: *const Self) bool {
         const len = std.math.min(self.str.len, other.str.len);
 
         for (self.str[0..len]) |c, i| {
@@ -144,7 +163,7 @@ pub const String = new_object(.String, struct {
         return self.str.len > other.str.len;
     }
 
-    fn lt(self: *Self, other: *Self) bool {
+    fn lt(self: *const Self, other: *const Self) bool {
         const len = std.math.min(self.str.len, other.str.len);
 
         for (self.str[0..len]) |c, i| {
@@ -156,6 +175,10 @@ pub const String = new_object(.String, struct {
         }
 
         return self.str.len < other.str.len;
+    }
+
+    fn print(self: *const Self) void {
+        std.debug.print("{s}", .{self.str});
     }
 });
 
@@ -244,8 +267,8 @@ pub const Value = union(enum) {
         return std.meta.activeTag(self.*);
     }
 
-    pub fn eq(self: *const Self, other: Self) !bool {
-        if (self.tag() != other) {
+    pub fn eq(self: *Self, other: *Self) !bool {
+        if (self.tag() != other.tag()) {
             return false;
         }
 
@@ -257,8 +280,8 @@ pub const Value = union(enum) {
         }
     }
 
-    pub fn gt(self: *const Self, other: Self) !bool {
-        if (self.tag() != other) {
+    pub fn gt(self: *Self, other: *Self) !bool {
+        if (self.tag() != other.tag()) {
             return error.CannotCompareValues;
         }
 
@@ -270,8 +293,8 @@ pub const Value = union(enum) {
         }
     }
 
-    pub fn lt(self: *const Self, other: Self) !bool {
-        if (self.tag() != other) {
+    pub fn lt(self: *Self, other: *Self) !bool {
+        if (self.tag() != other.tag()) {
             return error.CannotCompareValues;
         }
 
@@ -280,6 +303,15 @@ pub const Value = union(enum) {
             .Number => |val| return val < try other.as(.Number),
             .Bool => return error.CannotCompareValues,
             .None => return error.CannotCompareValues,
+        }
+    }
+
+    pub fn print(self: *Self) void {
+        switch (self.*) {
+            .Object => |obj| obj.print(),
+            .Number => |num| std.debug.print("{}", .{num}),
+            .Bool => |b| std.debug.print("{}", .{b}),
+            .None => std.debug.print("None", .{}),
         }
     }
 };

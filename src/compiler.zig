@@ -44,9 +44,12 @@ pub const Compiler = struct {
         switch (stmt.*) {
             .Expr => |expr| {
                 try self.compile_expr(expr);
+                try self.write_instruction(.Pop);
+            },
+            .Print => |expr| {
+                try self.compile_expr(expr);
+                try self.write_instruction(.Print);
 
-                // TEMP:
-                try self.write_instruction(.Return);
             },
             else => return error.Unimplemented,
         }

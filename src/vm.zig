@@ -51,9 +51,15 @@ pub const Vm = struct {
             }
 
             switch (inst) {
-                .Return => {
-                    std.debug.print("{}\n", .{try self.pop_value()});
-                    // return .Ok;
+                .Return, .Call => unreachable,
+                .Pop => {
+                    _ = try self.pop_value();
+                },
+                .Print => {
+                    var val = try self.pop_value();
+                    const print = std.debug.print;
+                    val.print();
+                    print("\n", .{});
                 },
                 .Constant => |index| {
                     var val = self.chunk.consts.items[index];
@@ -75,17 +81,17 @@ pub const Vm = struct {
                 .Equal => {
                     var v1 = try self.pop_value();
                     var v2 = try self.pop_value();
-                    try self.push_value(try v2.eq(v1));
+                    try self.push_value(try v2.eq(&v1));
                 },
                 .GreaterThan => {
                     var v1 = try self.pop_value();
                     var v2 = try self.pop_value();
-                    try self.push_value(try v2.gt(v1));
+                    try self.push_value(try v2.gt(&v1));
                 },
                 .LessThan => {
                     var v1 = try self.pop_value();
                     var v2 = try self.pop_value();
-                    try self.push_value(try v2.lt(v1));
+                    try self.push_value(try v2.lt(&v1));
                 },
                 .Add => {
                     var v1 = try self.pop_value();
@@ -111,7 +117,6 @@ pub const Vm = struct {
                     const num = try v2.as(.Number) / try v1.as(.Number);
                     try self.push_value(num);
                 },
-                .Call => {},
             }
         }
 
