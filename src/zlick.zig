@@ -82,7 +82,14 @@ pub const Zlick = struct {
         var parser = Parser.new(tokens.toOwnedSlice(), self.alloc);
         defer parser.deinit();
 
-        while (try parser.next_stmt()) |s| {
+        while (true) {
+            const s = parser.next_stmt() catch |err| {
+                self.had_err = true;
+                std.debug.print("{}\n", .{err});
+                continue;
+            } orelse {
+                break;
+            };
             defer s.free(self.alloc);
 
             // std.debug.print("{any}\n", .{s});
@@ -91,7 +98,10 @@ pub const Zlick = struct {
                 continue;
             }
 
-            var r = try compiler.compile_stmt(s);
+            var r = compiler.compile_stmt(s) catch |err| {
+                self.had_err = true;
+                std.debug.print("{}\n", .{err});
+            };
             _ = r;
 
             // if (r) |res| {
@@ -105,6 +115,10 @@ pub const Zlick = struct {
             //     std.debug.print("{}\n", .{err});
             //     self.had_err = true;
             // }
+        }
+
+        if (self.had_err) {
+            return;
         }
 
         var vm = try Vm.new(self.chunk);
