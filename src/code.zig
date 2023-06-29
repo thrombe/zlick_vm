@@ -3,13 +3,16 @@ const std = @import("std");
 pub const Instruction = union(enum) {
     const Self = @This();
     const ConstantRef = u8;
+    const JmpOffset = u16;
 
     Return,
     Call: u8,
+
     Constant: ConstantRef,
     ConstNone,
     ConstTrue,
     ConstFalse,
+
     Negate,
     LogicalNot,
     Add,
@@ -19,15 +22,34 @@ pub const Instruction = union(enum) {
     Equal,
     GreaterThan,
     LessThan,
+
     Pop,
     PopN: ConstantRef,
+
     DefineGlobal: ConstantRef,
     GetGlobal: ConstantRef,
     SetGlobal: ConstantRef,
     GetLocal: ConstantRef,
     SetLocal: ConstantRef,
 
+    JmpIfFalse: JmpOffset,
+    Jmp: JmpOffset,
+
     Print,
+
+    pub fn size(opcode: Opcode) usize {
+        inline for (std.meta.tags(Opcode)) |tag, i| {
+            if (comptime tag == opcode) {
+                const name = comptime std.meta.fieldNames(Opcode)[i];
+                const field_index = comptime std.meta.fieldIndex(Instruction, name).?;
+                const field = comptime std.meta.fields(Instruction)[field_index];
+                const payload_type = comptime field.field_type;
+                const payload_size = comptime @sizeOf(payload_type);
+                return payload_size + 1;
+            }
+        }
+        unreachable;
+    }
 };
 
 pub const Opcode = std.meta.Tag(Instruction);
@@ -332,6 +354,7 @@ pub const Chunk = struct {
     const Self = @This();
     pub const Error = error{
         BadByteOffset,
+        CodeOverflow,
     };
 
     const ByteList = std.ArrayListUnmanaged(u8);
@@ -368,6 +391,26 @@ pub const Chunk = struct {
     pub fn write_constant(self: *Self, constant: Value) !u8 {
         try self.consts.append(self.alloc, constant);
         return @intCast(u8, self.consts.items.len - 1);
+    }
+
+    pub fn edit_instruction(self: *Self, inst: Instruction, pos: usize) !void {
+        const opcode = @enumToInt(inst);
+
+        if (pos + Instruction.size(std.meta.activeTag(inst)) > self.code.items.len - 1) {
+            return error.CodeOverflow;
+        }
+        self.code.items[pos] = opcode;
+
+        inline for (std.meta.tags(Opcode)) |tag, i| {
+            if (tag == inst) {
+                const name = comptime std.meta.fieldNames(Opcode)[i];
+                const payload = comptime @field(inst, name);
+
+                for (std.mem.asBytes(&payload)) |byte, j| {
+                    self.code.items[pos + 1 + j] = byte;
+                }
+            }
+        }
     }
 
     pub fn write_instruction(self: *Self, inst: Instruction, line: usize) !void {

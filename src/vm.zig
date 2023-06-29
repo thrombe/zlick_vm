@@ -14,6 +14,7 @@ pub const Vm = struct {
         StackOverflow,
         StackUnderflow,
         UndefinedVariable,
+        PeekErr,
     };
     pub const Result = enum {
         Ok,
@@ -160,6 +161,15 @@ pub const Vm = struct {
                     const num = try v2.as(.Number) / try v1.as(.Number);
                     try self.push_value(num);
                 },
+                .JmpIfFalse => |offset| {
+                    var condition = try self.peek_value();
+                    if (!try condition.as(.Bool)) {
+                        reader.curr += offset;
+                    }
+                },
+                .Jmp => |offset| {
+                    reader.curr += offset;
+                },
             }
         }
 
@@ -181,6 +191,14 @@ pub const Vm = struct {
             return self.stack[self.stack_top];
         } else {
             return error.StackUnderflow;
+        }
+    }
+
+    fn peek_value(self: *Self) !Value {
+        if (self.stack_top == 0) {
+            return error.PeekErr;
+        } else {
+            return self.stack[self.stack_top - 1];
         }
     }
 };

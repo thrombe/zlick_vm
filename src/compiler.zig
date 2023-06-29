@@ -3,6 +3,7 @@ const std = @import("std");
 const code_mod = @import("code.zig");
 const Chunk = code_mod.Chunk;
 const Instruction = code_mod.Instruction;
+const Opcode = code_mod.Opcode;
 
 const lexer_mod = @import("lexer.zig");
 const TokenInfo = lexer_mod.TokenInfo;
@@ -99,6 +100,20 @@ pub const Compiler = struct {
         try self.chunk.write_instruction(inst, 0);
     }
 
+    fn edit_instruction(self: *Self, inst: Instruction, pos: usize) !void {
+        try self.chunk.edit_instruction(inst, pos);
+    }
+
+    fn patch_jmp(self: *Self, comptime opcode: Opcode, pos: usize) !void {
+        const target = self.chunk.code.items.len;
+
+        const offset = target - pos - Instruction.size(opcode);
+        try self.edit_instruction(
+            @unionInit(Instruction, @tagName(opcode), @intCast(std.meta.TagPayload(Instruction, opcode), offset)),
+            pos,
+        );
+    }
+
     pub fn compile_stmt(self: *Self, stmt: *Stmt) !void {
         switch (stmt.*) {
             .Expr => |expr| {
@@ -154,6 +169,27 @@ pub const Compiler = struct {
                 for (val) |s| {
                     try self.compile_stmt(s);
                 }
+            },
+            .If => |val| {
+                try self.compile_expr(val.condition);
+
+                const if_jmp = self.chunk.code.items.len;
+                try self.write_instruction(.{ .JmpIfFalse = 0 });
+
+                try self.write_instruction(.Pop);
+                try self.compile_stmt(val.if_block);
+
+                const else_jmp = self.chunk.code.items.len;
+                try self.write_instruction(.{ .Jmp = 0 });
+
+                try self.patch_jmp(.JmpIfFalse, if_jmp);
+
+                try self.write_instruction(.Pop);
+                if (val.else_block) |els| {
+                    try self.compile_stmt(els);
+                }
+
+                try self.patch_jmp(.Jmp, else_jmp);
             },
             else => return error.Unimplemented,
         }
