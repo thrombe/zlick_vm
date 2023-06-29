@@ -2,10 +2,11 @@ const std = @import("std");
 
 pub const Instruction = union(enum) {
     const Self = @This();
+    const ConstantRef = u8;
 
     Return,
     Call: u8,
-    Constant: u8,
+    Constant: ConstantRef,
     ConstNone,
     ConstTrue,
     ConstFalse,
@@ -19,6 +20,9 @@ pub const Instruction = union(enum) {
     GreaterThan,
     LessThan,
     Pop,
+    DefineGlobal: ConstantRef,
+    GetGlobal: ConstantRef,
+    SetGlobal: ConstantRef,
 
     Print,
 };
@@ -49,19 +53,19 @@ pub const Object = struct {
         };
     }
 
-    pub fn as(self: *Self, comptime tag: Tag) !*tag_to_type(tag) {
+    pub fn as(self: *Self, comptime tag: Tag) !*tag_to_type(tag).Inner {
         if (self.tag != tag) {
             return error.BadObjectCast;
         } else {
-            return @fieldParentPtr(tag_to_type(tag), "tag", self);
+            return &@fieldParentPtr(tag_to_type(tag), "tag", self).inner;
         }
     }
 
-    pub fn try_as(self: *Self, comptime tag: Tag) ?*tag_to_type(tag) {
+    pub fn try_as(self: *Self, comptime tag: Tag) ?*tag_to_type(tag).Inner {
         if (self.tag != tag) {
             return null;
         } else {
-            return @fieldParentPtr(tag_to_type(tag), "tag", self);
+            return &@fieldParentPtr(tag_to_type(tag), "tag", self).inner;
         }
     }
 
@@ -75,7 +79,7 @@ pub const Object = struct {
                 if (self.is(t)) {
                     const a = self.as(t) catch unreachable;
                     const b = other.as(t) catch unreachable;
-                    return a.inner.eq(&b.inner);
+                    return a.eq(b);
                 }
             }
             unreachable;
@@ -90,7 +94,7 @@ pub const Object = struct {
                 if (self.is(t)) {
                     const a = self.as(t) catch unreachable;
                     const b = other.as(t) catch unreachable;
-                    return a.inner.gt(&b.inner);
+                    return a.gt(b);
                 }
             }
             unreachable;
@@ -105,7 +109,7 @@ pub const Object = struct {
                 if (self.is(t)) {
                     const a = self.as(t) catch unreachable;
                     const b = other.as(t) catch unreachable;
-                    return a.inner.lt(&b.inner);
+                    return a.lt(b);
                 }
             }
             unreachable;
@@ -117,7 +121,7 @@ pub const Object = struct {
     pub fn print(self: *Self) void {
         inline for (.{.String}) |t| {
             if (self.try_as(t)) |v| {
-                return v.inner.print();
+                return v.print();
             }
         }
     }
@@ -240,7 +244,7 @@ pub const Value = union(enum) {
         return typ == self.*;
     }
 
-    pub fn as(self: *const Self, comptime typ: Self.Tag) !switch (typ) {
+    pub fn as(self: *Self, comptime typ: Self.Tag) !switch (typ) {
         .Object => *Object,
         .Number => f64,
         .Bool => bool,
@@ -261,6 +265,11 @@ pub const Value = union(enum) {
                 .None => error.NotNone,
             };
         }
+    }
+
+    pub fn as_obj(self: *Self, comptime t: Object.Tag) !*Object.tag_to_type(t).Inner {
+        var obj = try self.as(.Object);
+        return try obj.as(t);
     }
 
     pub fn tag(self: *const Self) Self.Tag {
@@ -518,9 +527,18 @@ pub const Disassembler = struct {
                 if (payload_size > 0) {
                     print("({}) ", .{payload});
 
-                    if (.Constant == tag) {
-                        const val = self.chunk.consts.items[payload];
-                        print("[{}]", .{val});
+                    switch (tag) {
+                        .Constant => {
+                            const val = self.chunk.consts.items[payload];
+                            print("[{}]", .{val});
+                        },
+                        .DefineGlobal, .GetGlobal, .SetGlobal => {
+                            var val = self.chunk.consts.items[payload];
+                            var obj = try val.as(.Object);
+                            var str = try obj.as(.String);
+                            print("[{s}]", .{str.str});
+                        },
+                        else => {},
                     }
                 }
             }

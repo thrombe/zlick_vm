@@ -49,7 +49,26 @@ pub const Compiler = struct {
             .Print => |expr| {
                 try self.compile_expr(expr);
                 try self.write_instruction(.Print);
+            },
+            .Let => |val| {
+                if (val.init_expr) |expr| {
+                    try self.compile_expr(expr);
+                } else {
+                    try self.write_instruction(.ConstNone);
+                }
 
+                var obj = try self.chunk.alloc.create(code_mod.String);
+                obj.* = code_mod.String.new(.{ .str = val.name });
+                const s = try self.chunk.write_constant(.{ .Object = &obj.tag });
+                try self.write_instruction(.{ .DefineGlobal = s });
+            },
+            .Assign => |val| {
+                try self.compile_expr(val.expr);
+
+                var obj = try self.chunk.alloc.create(code_mod.String);
+                obj.* = code_mod.String.new(.{ .str = val.name });
+                const s = try self.chunk.write_constant(.{ .Object = &obj.tag });
+                try self.write_instruction(.{ .SetGlobal = s });
             },
             else => return error.Unimplemented,
         }
@@ -111,6 +130,12 @@ pub const Compiler = struct {
             },
             .Group => |val| {
                 try self.compile_expr(val);
+            },
+            .Variable => |val| {
+                var obj = try self.chunk.alloc.create(code_mod.String);
+                obj.* = code_mod.String.new(.{ .str = val });
+                const s = try self.chunk.write_constant(.{ .Object = &obj.tag });
+                try self.write_instruction(.{ .GetGlobal = s });
             },
             else => return error.Unimplemented,
         }

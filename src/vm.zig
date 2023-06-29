@@ -13,17 +13,32 @@ pub const Vm = struct {
     pub const Error = error{
         StackOverflow,
         StackUnderflow,
+        UndefinedVariable,
     };
     pub const Result = enum {
         Ok,
     };
+
+    const GlobalValues = std.StringHashMap(Value);
 
     chunk: *Chunk,
     dis: Disassembler,
     stack: []Value,
     stack_top: usize = 0,
 
-    // TODO: it might be faster to deref a pointer than indexing an array.
+    // TODO: very inefficient to do a hashmap lookup for every variable.
+    // can do some kind of intermediate refrence thing at compile time maybe
+    // at compile time - have a monotonic increasing counter that increases each time
+    // a new string or an identifier is encountered.
+    // create a new type of Value that just stores this value (effectively refrencing this string)
+    // this would also Intern the string as only one copy of it would be required.
+    //
+    // this table can be turned into (u32 -> Value) if the above is implemented
+    // (the vounter value is for each unique string and not each unique variable)
+    globals: GlobalValues,
+
+    // TODO: (each byte in Chunk is accessed using indexing instead of simple pointer derefs and pointer arithmatics)
+    // it might be faster to deref a pointer than indexing an array.
     // but it is easier to modify the chunk curr position.
     // maybe check the speed difference and implement it using pointers instead
 
@@ -31,11 +46,14 @@ pub const Vm = struct {
 
     pub fn new(chunk: *Chunk) !Self {
         var stack = try chunk.alloc.alloc(Value, 256);
-        return .{ .chunk = chunk, .stack = stack, .dis = Disassembler.new(chunk) };
+        var globals = GlobalValues.init(chunk.alloc);
+        var dis = Disassembler.new(chunk);
+        return .{ .chunk = chunk, .stack = stack, .dis = dis, .globals = globals };
     }
 
     pub fn deinit(self: *Self) void {
         self.chunk.alloc.free(self.stack);
+        self.globals.deinit();
     }
 
     pub fn run(self: *Self) !Result {
@@ -54,6 +72,23 @@ pub const Vm = struct {
                 .Return, .Call => unreachable,
                 .Pop => {
                     _ = try self.pop_value();
+                },
+                .DefineGlobal => |c| {
+                    var val = self.chunk.consts.items[c];
+                    var str = try val.as_obj(.String);
+                    try self.globals.put(str.str, try self.pop_value());
+                },
+                .GetGlobal => |c| {
+                    var name_val = self.chunk.consts.items[c];
+                    var name = try name_val.as_obj(.String);
+                    var val = self.globals.get(name.str) orelse return error.UndefinedVariable;
+                    try self.push_value(val);
+                },
+                .SetGlobal => |c| {
+                    var name_val = self.chunk.consts.items[c];
+                    var name = try name_val.as_obj(.String);
+                    var val = self.globals.getPtr(name.str) orelse return error.UndefinedVariable;
+                    val.* = try self.pop_value();
                 },
                 .Print => {
                     var val = try self.pop_value();
