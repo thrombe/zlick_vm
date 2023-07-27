@@ -96,7 +96,7 @@ pub const Compiler = struct {
 
         // create an entry for our main script function
         // try locals.locals.append(.{ .name = "", .depth = 0 });
-        _ = try chunk.write_constant(.None);
+        // _ = try chunk.write_constant(.None);
         try locals.define("");
 
         return .{

@@ -102,8 +102,29 @@ pub const Vm = struct {
         std.debug.print("---- stack trace end ----\n", .{});
     }
 
+    fn define_native_fn(self: *Self, comptime fn_name: []const u8, comptime arity: u8, comptime T: type) !void {
+        // /usr/lib/zig/std/builtin.zig
+        var val = try self.alloc.create(code_mod.NativeFunction);
+        val.* = code_mod.NativeFunction.new(.{
+            // .arity = std.meta.fieldNames(std.meta.ArgsTuple(@TypeOf(@field(@TypeOf(t), fn_name)))).len,
+            .arity = arity,
+            .name = fn_name,
+            .func = @ptrCast(code_mod.NativeFunction.Inner.TypeFunc, &@field(T, fn_name)),
+        });
+        try self.globals.put(fn_name, .{
+            .Object = &val.tag,
+        });
+    }
+
     pub fn start_script(self: *Self, func: *Function) !Result {
         try self.push_value(null);
+
+        const Builtins = struct {
+            fn clock(_: []Value) !Value {
+                return .{ .Number = @intToFloat(f64, std.time.milliTimestamp()) };
+            }
+        };
+        try self.define_native_fn("clock", 0, Builtins);
 
         errdefer self.stacktrace();
 
@@ -132,11 +153,27 @@ pub const Vm = struct {
                 },
                 .Call => |args| {
                     var callee = self.stack[self.stack_top - 1 - args];
-                    var cal = callee.as_obj(.Function) catch return error.NotCallable;
-                    if (cal.inner.arity != args) {
-                        return error.IncorrectNumArgs;
+                    switch ((try callee.as(.Object)).tag) {
+                        .Function => {
+                            var cal = callee.as_obj(.Function) catch unreachable;
+                            if (cal.inner.arity != args) {
+                                return error.IncorrectNumArgs;
+                            }
+                            frame = try self.push_callframe(cal, args);
+                        },
+                        .NativeFunction => {
+                            var cal = callee.as_obj(.NativeFunction) catch unreachable;
+                            if (cal.inner.arity != args) {
+                                return error.IncorrectNumArgs;
+                            }
+
+                            var arguments = self.stack[frame.stack_top + 1 .. self.stack_top];
+                            const res = try cal.inner.func(arguments);
+                            _ = try self.pop_value();
+                            try self.push_value(res);
+                        },
+                        else => return error.NotCallable,
                     }
-                    frame = try self.push_callframe(cal, args);
                 },
                 .Pop => {
                     _ = try self.pop_value();

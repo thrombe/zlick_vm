@@ -67,6 +67,7 @@ pub const Object = struct {
     pub const Tag = enum(u8) {
         String,
         Function,
+        NativeFunction,
     };
 
     tag: Tag,
@@ -75,6 +76,7 @@ pub const Object = struct {
         return switch (tag) {
             .String => String,
             .Function => Function,
+            .NativeFunction => NativeFunction,
         };
     }
 
@@ -138,7 +140,7 @@ pub const Object = struct {
     }
 
     pub fn print(self: *Self) !void {
-        inline for (.{ .String, .Function }) |t| {
+        inline for (.{ .String, .Function, .NativeFunction }) |t| {
             if (self.try_as(t)) |v| {
                 return v.inner.print();
             }
@@ -231,6 +233,27 @@ pub const Function = new_object(.Function, struct {
 
     fn print(self: *const Self) void {
         std.debug.print("<fn {s}>", .{self.name});
+    }
+});
+
+pub const NativeFunction = new_object(.NativeFunction, struct {
+    const Self = @This();
+    pub const TypeFunc = *const fn (args: []Value) anyerror!Value;
+
+    arity: u32,
+    name: []const u8,
+    func: TypeFunc,
+
+    fn deinit(self: *Self, alloc: std.mem.Allocator) void {
+        alloc.destroy(self);
+    }
+
+    fn print(self: *const Self) void {
+        std.debug.print("<native fn {s}>", .{self.name});
+    }
+
+    fn call(self: *Self, args: []Value) anyerror!Value {
+        return try self.func(args);
     }
 });
 
