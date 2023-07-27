@@ -26,6 +26,7 @@ pub const Vm = struct {
 
     const GlobalValues = std.StringHashMap(Value);
     const CallFrame = struct {
+        func: *Function,
         reader: ChunkReader,
         stack_top: usize,
     };
@@ -71,6 +72,7 @@ pub const Vm = struct {
         }
 
         var callf = .{
+            .func = func,
             .reader = func.inner.chunk.reader(),
             .stack_top = self.stack_top - args,
         };
@@ -93,19 +95,23 @@ pub const Vm = struct {
     }
 
     fn stacktrace(self: *Self) void {
-        for (self.frames) |_| {
-            // std.debug.print("fn {s}\n", .{frame.reader.})
+        std.debug.print("---- stack trace ----\n", .{});
+        for (self.frames[0..self.frame_top]) |frame| {
+            std.debug.print("fn {s}\n", .{frame.func.inner.name});
         }
+        std.debug.print("---- stack trace end ----\n", .{});
     }
 
     pub fn start_script(self: *Self, func: *Function) !Result {
         try self.push_value(null);
-        return self.run(func);
+
+        errdefer self.stacktrace();
+
+        return try self.run(func);
     }
 
     pub fn run(self: *Self, func: *Function) !Result {
         var frame = try self.push_callframe(func, 0);
-        errdefer self.stacktrace();
 
         while (frame.reader.has_next()) {
             const start = frame.reader.curr;

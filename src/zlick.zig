@@ -125,7 +125,7 @@ pub const Zlick = struct {
         try compiler.end_script();
 
         var dis = Disassembler.new(&func.Script.inner.chunk);
-        try dis.disassemble_chunk("script");
+        try dis.disassemble_chunk(func.Script.inner.name);
 
         _ = try self.vm.start_script(&func.Script);
     }
