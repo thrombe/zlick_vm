@@ -18,7 +18,7 @@ pub fn main() !void {
     defer zlick.deinit();
 
     if (args.len > 2) {
-        try stdout.print("lokx [script]\n", .{});
+        try stdout.print("zlick [script]\n", .{});
     } else if (args.len == 2) {
         try zlick.run_file(args[1]);
     } else {

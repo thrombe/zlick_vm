@@ -2,6 +2,7 @@ const std = @import("std");
 
 const code_mod = @import("code.zig");
 const Chunk = code_mod.Chunk;
+const Disassembler = code_mod.Disassembler;
 
 const vm_mod = @import("vm.zig");
 const Vm = vm_mod.Vm;
@@ -20,22 +21,17 @@ pub const Zlick = struct {
     const Self = @This();
 
     alloc: std.mem.Allocator,
-    chunk: *Chunk,
     vm: Vm,
 
     had_err: bool = false,
 
     pub fn new(alloc: std.mem.Allocator) !Self {
-        var chunk = try alloc.create(Chunk);
-        chunk.* = Chunk.new(alloc);
-        const vm = try Vm.new(chunk);
-        return .{ .alloc = alloc, .chunk = chunk, .vm = vm };
+        const vm = try Vm.new(alloc);
+        return .{ .alloc = alloc, .vm = vm };
     }
 
     pub fn deinit(self: *Self) void {
         self.vm.deinit();
-        self.chunk.deinit();
-        self.alloc.destroy(self.chunk);
     }
 
     pub fn repl(self: *Self) !void {
@@ -70,7 +66,12 @@ pub const Zlick = struct {
         var lexer = try Lexer.new(code, self.alloc);
         defer lexer.deinit();
 
-        var compiler = try Compiler.new(self.chunk);
+        var func = .{ .Script = code_mod.Function.new(.{
+            .arity = 0,
+            .name = "<script>",
+            .chunk = code_mod.Chunk.new(self.alloc),
+        }) };
+        var compiler = try Compiler.new(&func.Script.inner.chunk, self.alloc);
         defer compiler.deinit();
 
         var tokens = std.ArrayList(Token).init(self.alloc);
@@ -121,9 +122,11 @@ pub const Zlick = struct {
             return;
         }
 
-        var vm = try Vm.new(self.chunk);
-        defer vm.deinit();
+        try compiler.end_script();
 
-        _ = try vm.run();
+        var dis = Disassembler.new(&func.Script.inner.chunk);
+        try dis.disassemble_chunk("script");
+
+        _ = try self.vm.start_script(&func.Script);
     }
 };

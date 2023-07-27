@@ -4,6 +4,7 @@ const code_mod = @import("code.zig");
 const Chunk = code_mod.Chunk;
 const Instruction = code_mod.Instruction;
 const Opcode = code_mod.Opcode;
+const Function = code_mod.Function;
 
 const lexer_mod = @import("lexer.zig");
 const TokenInfo = lexer_mod.TokenInfo;
@@ -24,6 +25,8 @@ pub const Compiler = struct {
 
     chunk: *Chunk,
     locals: LocalMan,
+    // TODO: remove alloc stored in a chunk maybe
+    alloc: std.mem.Allocator,
 
     const LocalMan = struct {
         const LocalsList = std.ArrayList(Local);
@@ -65,7 +68,7 @@ pub const Compiler = struct {
             for (self.locals.items) |_| {
                 const j = self.locals.items.len - 1;
                 const val = self.locals.items[j];
-                if (val.depth == self.curr_scope) {
+                if (val.depth <= self.curr_scope) {
                     break;
                 }
                 _ = self.locals.pop();
@@ -88,12 +91,27 @@ pub const Compiler = struct {
         depth: u32,
     };
 
-    pub fn new(chunk: *Chunk) !Self {
-        return .{ .chunk = chunk, .locals = LocalMan.new(chunk.alloc) };
+    pub fn new(chunk: *Chunk, alloc: std.mem.Allocator) !Self {
+        var locals = LocalMan.new(alloc);
+
+        // create an entry for our main script function
+        // try locals.locals.append(.{ .name = "", .depth = 0 });
+        _ = try chunk.write_constant(.None);
+        try locals.define("");
+
+        return .{
+            .locals = locals,
+            .chunk = chunk,
+            .alloc = alloc,
+        };
     }
 
     pub fn deinit(self: *Self) void {
         self.locals.deinit();
+    }
+
+    fn write_constant(self: *Self, constant: code_mod.Value) !u8 {
+        return self.chunk.write_constant(constant);
     }
 
     fn write_instruction(self: *Self, inst: Instruction) !void {
@@ -128,6 +146,11 @@ pub const Compiler = struct {
         ));
     }
 
+    pub fn end_script(self: *Self) !void {
+        try self.write_instruction(.ConstNone);
+        try self.write_instruction(.Return);
+    }
+
     pub fn compile_stmt(self: *Self, stmt: *Stmt) !void {
         switch (stmt.*) {
             .Expr => |expr| {
@@ -146,9 +169,9 @@ pub const Compiler = struct {
                 }
 
                 if (self.locals.curr_scope == 0) {
-                    var obj = try self.chunk.alloc.create(code_mod.String);
+                    var obj = try self.alloc.create(code_mod.String);
                     obj.* = code_mod.String.new(.{ .str = val.name });
-                    const s = try self.chunk.write_constant(.{ .Object = &obj.tag });
+                    const s = try self.write_constant(.{ .Object = &obj.tag });
 
                     try self.write_instruction(.{ .DefineGlobal = s });
                 } else {
@@ -160,9 +183,9 @@ pub const Compiler = struct {
                 try self.compile_expr(val.expr);
 
                 if (self.locals.curr_scope == 0) {
-                    var obj = try self.chunk.alloc.create(code_mod.String);
+                    var obj = try self.alloc.create(code_mod.String);
                     obj.* = code_mod.String.new(.{ .str = val.name });
-                    const s = try self.chunk.write_constant(.{ .Object = &obj.tag });
+                    const s = try self.write_constant(.{ .Object = &obj.tag });
 
                     try self.write_instruction(.{ .SetGlobal = s });
                 } else {
@@ -252,6 +275,49 @@ pub const Compiler = struct {
                     try self.write_instruction(.Pop);
                 }
             },
+            .Function => |val| {
+                var n = try self.alloc.alloc(u8, val.name.len);
+                std.mem.copy(u8, n, val.name);
+
+                var func = try self.alloc.create(Function);
+                func.* = Function.new(.{
+                    .arity = @intCast(u32, val.params.len),
+                    .name = n,
+                    .chunk = code_mod.Chunk.new(self.alloc),
+                });
+
+                var comp = try Compiler.new(&func.inner.chunk, self.alloc);
+                defer comp.deinit();
+                for (val.params) |name| {
+                    try comp.locals.define(name);
+                }
+                try comp.compile_stmt(val.body);
+                try comp.write_instruction(.ConstNone);
+                try comp.write_instruction(.Return);
+
+                var dis = code_mod.Disassembler.new(&func.inner.chunk);
+                try dis.disassemble_chunk(val.name);
+
+                const s = try self.write_constant(.{ .Object = &func.tag });
+                try self.write_instruction(.{ .Constant = s });
+                if (self.locals.curr_scope == 0) {
+                    var obj = try self.alloc.create(code_mod.String);
+                    obj.* = code_mod.String.new(.{ .str = val.name });
+                    const g = try self.write_constant(.{ .Object = &obj.tag });
+
+                    try self.write_instruction(.{ .DefineGlobal = g });
+                } else {
+                    try self.locals.define(val.name);
+                }
+            },
+            .Return => |val| {
+                if (val.val) |ret| {
+                    try self.compile_expr(ret);
+                } else {
+                    try self.write_instruction(.ConstNone);
+                }
+                try self.write_instruction(.Return);
+            },
             else => return error.Unimplemented,
         }
     }
@@ -262,17 +328,17 @@ pub const Compiler = struct {
                 switch (val) {
                     .Number => |str| {
                         const num = try std.fmt.parseFloat(f64, str);
-                        const index = try self.chunk.write_constant(.{ .Number = num });
+                        const index = try self.write_constant(.{ .Number = num });
                         try self.write_instruction(.{ .Constant = index });
                     },
                     .None => try self.write_instruction(.ConstNone),
                     .True => try self.write_instruction(.ConstTrue),
                     .False => try self.write_instruction(.ConstFalse),
                     .String => |str| {
-                        var obj = try self.chunk.alloc.create(code_mod.String);
+                        var obj = try self.alloc.create(code_mod.String);
 
                         obj.* = code_mod.String.new(.{ .str = str });
-                        const s = try self.chunk.write_constant(.{ .Object = &obj.tag });
+                        const s = try self.write_constant(.{ .Object = &obj.tag });
 
                         try self.write_instruction(.{ .Constant = s });
                     },
@@ -345,16 +411,25 @@ pub const Compiler = struct {
                 try self.compile_expr(val);
             },
             .Variable => |val| {
-                var obj = try self.chunk.alloc.create(code_mod.String);
+                var obj = try self.alloc.create(code_mod.String);
 
-                if (self.locals.curr_scope == 0) {
+                if (self.locals.resolve(val)) |s| {
+                    try self.write_instruction(.{ .GetLocal = s });
+                } else {
                     obj.* = code_mod.String.new(.{ .str = val });
-                    const s = try self.chunk.write_constant(.{ .Object = &obj.tag });
+                    const s = try self.write_constant(.{ .Object = &obj.tag });
 
                     try self.write_instruction(.{ .GetGlobal = s });
-                } else {
-                    try self.write_instruction(.{ .GetLocal = self.locals.resolve(val) orelse return error.UndefinedVariable });
                 }
+            },
+            .Call => |val| {
+                try self.compile_expr(val.callee);
+
+                for (val.args) |arg| {
+                    try self.compile_expr(arg);
+                }
+
+                try self.write_instruction(.{ .Call = @intCast(u8, val.args.len) });
             },
             else => return error.Unimplemented,
         }

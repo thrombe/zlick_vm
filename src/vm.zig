@@ -7,6 +7,8 @@ const code_mod = @import("code.zig");
 const Chunk = code_mod.Chunk;
 const Disassembler = code_mod.Disassembler;
 const Value = code_mod.Value;
+const Function = code_mod.Function;
+const ChunkReader = code_mod.ChunkReader;
 
 pub const Vm = struct {
     const Self = @This();
@@ -15,15 +17,21 @@ pub const Vm = struct {
         StackUnderflow,
         UndefinedVariable,
         PeekErr,
+        NotCallable,
+        IncorrectNumArgs,
     };
     pub const Result = enum {
         Ok,
     };
 
     const GlobalValues = std.StringHashMap(Value);
+    const CallFrame = struct {
+        reader: ChunkReader,
+        stack_top: usize,
+    };
 
-    chunk: *Chunk,
-    dis: Disassembler,
+    frames: []CallFrame,
+    frame_top: usize = 0,
     stack: []Value,
     stack_top: usize = 0,
 
@@ -38,39 +46,92 @@ pub const Vm = struct {
     // (the vounter value is for each unique string and not each unique variable)
     globals: GlobalValues,
 
-    // TODO: (each byte in Chunk is accessed using indexing instead of simple pointer derefs and pointer arithmatics)
-    // it might be faster to deref a pointer than indexing an array.
-    // but it is easier to modify the chunk curr position.
-    // maybe check the speed difference and implement it using pointers instead
+    alloc: std.mem.Allocator,
 
     // TODO: “direct threaded code”, “jump table”, and “computed goto”
 
-    pub fn new(chunk: *Chunk) !Self {
-        var stack = try chunk.alloc.alloc(Value, 256);
-        var globals = GlobalValues.init(chunk.alloc);
-        var dis = Disassembler.new(chunk);
-        return .{ .chunk = chunk, .stack = stack, .dis = dis, .globals = globals };
+    pub fn new(alloc: std.mem.Allocator) !Self {
+        var stack = try alloc.alloc(Value, 256 * 64);
+        var globals = GlobalValues.init(alloc);
+        var frames = try alloc.alloc(CallFrame, 64);
+        return .{ .stack = stack, .globals = globals, .frames = frames, .alloc = alloc };
     }
 
     pub fn deinit(self: *Self) void {
-        self.chunk.alloc.free(self.stack);
+        for (self.stack) |*val| {
+            val.deinit(self.alloc);
+        }
+        self.alloc.free(self.stack);
         self.globals.deinit();
     }
 
-    pub fn run(self: *Self) !Result {
-        var reader = self.chunk.reader();
+    fn push_callframe(self: *Self, func: *Function, args: u8) !*CallFrame {
+        if (self.frame_top >= self.frames.len) {
+            return error.StackOverflow;
+        }
 
-        while (reader.has_next()) {
-            const start = reader.curr;
-            const inst = try reader.next_instruction();
+        var callf = .{
+            .reader = func.inner.chunk.reader(),
+            .stack_top = self.stack_top - args,
+        };
+        self.frames[self.frame_top] = callf;
+        self.frame_top += 1;
+
+        return &self.frames[self.frame_top - 1];
+    }
+
+    fn pop_callframe(self: *Self) !?*CallFrame {
+        if (self.frame_top < 1) {
+            return error.StackUnderflow;
+        }
+        self.frame_top -= 1;
+        self.stack_top = self.frames[self.frame_top].stack_top - 1;
+        if (self.frame_top == 0) {
+            return null;
+        }
+        return &self.frames[self.frame_top - 1];
+    }
+
+    fn stacktrace(self: *Self) void {
+        for (self.frames) |_| {
+            // std.debug.print("fn {s}\n", .{frame.reader.})
+        }
+    }
+
+    pub fn start_script(self: *Self, func: *Function) !Result {
+        try self.push_value(null);
+        return self.run(func);
+    }
+
+    pub fn run(self: *Self, func: *Function) !Result {
+        var frame = try self.push_callframe(func, 0);
+        errdefer self.stacktrace();
+
+        while (frame.reader.has_next()) {
+            const start = frame.reader.curr;
+            const inst = try frame.reader.next_instruction();
 
             if (trace_enabled) {
                 std.debug.print("{any}\n", .{self.stack[0..self.stack_top]});
-                try self.dis.disassemble_instruction(inst, start);
+                var dis = Disassembler.new(frame.reader.chunk);
+                try dis.disassemble_instruction(inst, start);
             }
 
             switch (inst) {
-                .Return, .Call => unreachable,
+                .Return => {
+                    var result = try self.pop_value();
+                    frame = try self.pop_callframe() orelse return .Ok;
+
+                    try self.push_value(result);
+                },
+                .Call => |args| {
+                    var callee = self.stack[self.stack_top - 1 - args];
+                    var cal = callee.as_obj(.Function) catch return error.NotCallable;
+                    if (cal.inner.arity != args) {
+                        return error.IncorrectNumArgs;
+                    }
+                    frame = try self.push_callframe(cal, args);
+                },
                 .Pop => {
                     _ = try self.pop_value();
                 },
@@ -81,32 +142,32 @@ pub const Vm = struct {
                     }
                 },
                 .DefineGlobal => |c| {
-                    var val = self.chunk.consts.items[c];
+                    var val = frame.reader.chunk.consts.items[c];
                     var str = try val.as_obj(.String);
-                    try self.globals.put(str.str, try self.pop_value());
+                    try self.globals.put(str.inner.str, try self.pop_value());
                 },
                 .GetGlobal => |c| {
-                    var name_val = self.chunk.consts.items[c];
+                    var name_val = frame.reader.chunk.consts.items[c];
                     var name = try name_val.as_obj(.String);
-                    var val = self.globals.get(name.str) orelse return error.UndefinedVariable;
+                    var val = self.globals.get(name.inner.str) orelse return error.UndefinedVariable;
                     try self.push_value(val);
                 },
                 .SetGlobal => |c| {
-                    var name_val = self.chunk.consts.items[c];
+                    var name_val = frame.reader.chunk.consts.items[c];
                     var name = try name_val.as_obj(.String);
-                    var val = self.globals.getPtr(name.str) orelse return error.UndefinedVariable;
+                    var val = self.globals.getPtr(name.inner.str) orelse return error.UndefinedVariable;
                     val.* = try self.pop_value();
                 },
-                .GetLocal => |i| try self.push_value(self.stack[i]),
-                .SetLocal => |i| self.stack[i] = try self.pop_value(),
+                .GetLocal => |i| try self.push_value(self.stack[frame.stack_top + i - 1]),
+                .SetLocal => |i| self.stack[frame.stack_top + i - 1] = try self.pop_value(),
                 .Print => {
                     var val = try self.pop_value();
                     const print = std.debug.print;
-                    val.print();
+                    try val.print();
                     print("\n", .{});
                 },
                 .Constant => |index| {
-                    var val = self.chunk.consts.items[index];
+                    var val = frame.reader.chunk.consts.items[index];
                     try self.push_value(val);
                 },
                 .ConstNone => try self.push_value(null),
@@ -164,20 +225,20 @@ pub const Vm = struct {
                 .JmpIfFalse => |offset| {
                     var condition = try self.peek_value();
                     if (!try condition.as(.Bool)) {
-                        reader.curr += offset;
+                        frame.reader.curr += offset;
                     }
                 },
                 .JmpIfTrue => |offset| {
                     var condition = try self.peek_value();
                     if (try condition.as(.Bool)) {
-                        reader.curr += offset;
+                        frame.reader.curr += offset;
                     }
                 },
                 .Jmp => |offset| {
-                    reader.curr += offset;
+                    frame.reader.curr += offset;
                 },
                 .Loop => |offset| {
-                    reader.curr -= offset;
+                    frame.reader.curr -= offset;
                 },
             }
         }

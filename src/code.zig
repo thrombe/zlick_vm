@@ -66,6 +66,7 @@ pub const Object = struct {
     };
     pub const Tag = enum(u8) {
         String,
+        Function,
     };
 
     tag: Tag,
@@ -73,22 +74,23 @@ pub const Object = struct {
     fn tag_to_type(comptime tag: Tag) type {
         return switch (tag) {
             .String => String,
+            .Function => Function,
         };
     }
 
-    pub fn as(self: *Self, comptime tag: Tag) !*tag_to_type(tag).Inner {
+    pub fn as(self: *Self, comptime tag: Tag) !*tag_to_type(tag) {
         if (self.tag != tag) {
             return error.BadObjectCast;
         } else {
-            return &@fieldParentPtr(tag_to_type(tag), "tag", self).inner;
+            return @fieldParentPtr(tag_to_type(tag), "tag", self);
         }
     }
 
-    pub fn try_as(self: *Self, comptime tag: Tag) ?*tag_to_type(tag).Inner {
+    pub fn try_as(self: *Self, comptime tag: Tag) ?*tag_to_type(tag) {
         if (self.tag != tag) {
             return null;
         } else {
-            return &@fieldParentPtr(tag_to_type(tag), "tag", self).inner;
+            return @fieldParentPtr(tag_to_type(tag), "tag", self);
         }
     }
 
@@ -102,13 +104,11 @@ pub const Object = struct {
                 if (self.is(t)) {
                     const a = self.as(t) catch unreachable;
                     const b = other.as(t) catch unreachable;
-                    return a.eq(b);
+                    return a.inner.eq(&b.inner);
                 }
             }
-            unreachable;
-        } else {
-            return error.CannotCompareValues;
         }
+        return error.CannotCompareValues;
     }
 
     pub fn gt(self: *Self, other: *Self) !bool {
@@ -117,13 +117,11 @@ pub const Object = struct {
                 if (self.is(t)) {
                     const a = self.as(t) catch unreachable;
                     const b = other.as(t) catch unreachable;
-                    return a.gt(b);
+                    return a.inner.gt(&b.inner);
                 }
             }
-            unreachable;
-        } else {
-            return error.CannotCompareValues;
         }
+        return error.CannotCompareValues;
     }
 
     pub fn lt(self: *Self, other: *Self) !bool {
@@ -132,20 +130,25 @@ pub const Object = struct {
                 if (self.is(t)) {
                     const a = self.as(t) catch unreachable;
                     const b = other.as(t) catch unreachable;
-                    return a.lt(b);
+                    return a.inner.lt(&b.inner);
                 }
             }
-            unreachable;
-        } else {
-            return error.CannotCompareValues;
         }
+        return error.CannotCompareValues;
     }
 
-    pub fn print(self: *Self) void {
-        inline for (.{.String}) |t| {
+    pub fn print(self: *Self) !void {
+        inline for (.{ .String, .Function }) |t| {
             if (self.try_as(t)) |v| {
-                return v.print();
+                return v.inner.print();
             }
+        }
+        return error.CannotPrintValue;
+    }
+
+    pub fn deinit(self: *Self, alloc: std.mem.Allocator) void {
+        switch (self.tag) {
+            inline else => |itag| self.try_as(itag).?.inner.deinit(alloc),
         }
     }
 };
@@ -171,6 +174,11 @@ pub const String = new_object(.String, struct {
     const Self = @This();
 
     str: []const u8,
+
+    fn deinit(self: *Self, alloc: std.mem.Allocator) void {
+        alloc.free(self.str);
+        alloc.destroy(self);
+    }
 
     fn eq(self: *const Self, other: *const Self) bool {
         return std.mem.eql(u8, self.str, other.str);
@@ -206,6 +214,23 @@ pub const String = new_object(.String, struct {
 
     fn print(self: *const Self) void {
         std.debug.print("{s}", .{self.str});
+    }
+});
+
+pub const Function = new_object(.Function, struct {
+    const Self = @This();
+
+    arity: u32,
+    chunk: Chunk,
+    name: []const u8,
+
+    fn deinit(self: *Self, alloc: std.mem.Allocator) void {
+        alloc.free(self.name);
+        alloc.destroy(self);
+    }
+
+    fn print(self: *const Self) void {
+        std.debug.print("<fn {s}>", .{self.name});
     }
 });
 
@@ -290,7 +315,7 @@ pub const Value = union(enum) {
         }
     }
 
-    pub fn as_obj(self: *Self, comptime t: Object.Tag) !*Object.tag_to_type(t).Inner {
+    pub fn as_obj(self: *Self, comptime t: Object.Tag) !*Object.tag_to_type(t) {
         var obj = try self.as(.Object);
         return try obj.as(t);
     }
@@ -338,12 +363,19 @@ pub const Value = union(enum) {
         }
     }
 
-    pub fn print(self: *Self) void {
+    pub fn print(self: *Self) !void {
         switch (self.*) {
-            .Object => |obj| obj.print(),
+            .Object => |obj| try obj.print(),
             .Number => |num| std.debug.print("{}", .{num}),
             .Bool => |b| std.debug.print("{}", .{b}),
             .None => std.debug.print("None", .{}),
+        }
+    }
+
+    pub fn deinit(self: *Self, alloc: std.mem.Allocator) void {
+        switch (self.*) {
+            .Object => |obj| obj.deinit(alloc),
+            else => {},
         }
     }
 };
@@ -375,13 +407,16 @@ pub const Chunk = struct {
 
     pub fn deinit(self: *Self) void {
         self.code.deinit(self.alloc);
+        for (self.consts.items) |*item| {
+            item.deinit(self.alloc);
+        }
         self.consts.deinit(self.alloc);
         self.line_nos.deinit(self.alloc);
     }
 
     pub fn reader(self: *Self) ChunkReader {
         return .{
-            .code = self.code.items,
+            .chunk = self,
             .curr = 0,
         };
     }
@@ -427,6 +462,7 @@ pub const Chunk = struct {
                 const payload_size = comptime @sizeOf(@TypeOf(payload));
                 info.bytes += payload_size + 1;
 
+                // OOF: endianness might be a problem for getting cross compatible bytecode.
                 try self.code.appendSlice(self.alloc, std.mem.asBytes(&payload));
             },
         }
@@ -453,17 +489,23 @@ pub const ChunkReader = struct {
         BadOpcode,
     };
 
-    code: []u8,
+    // TODO:
+    // each time next_byte is called - it has to go through many indirections. (first to self, then to chunk, then to items)
+    chunk: *Chunk,
+    // TODO: (each byte in Chunk is accessed using indexing instead of simple pointer derefs and pointer arithmatics)
+    // it might be faster to deref a pointer than indexing an array.
+    // but it is easier to modify the chunk curr position.
+    // maybe check the speed difference and implement it using pointers instead
     curr: usize,
 
     pub fn has_next(self: *Self) bool {
-        return self.code.len > self.curr;
+        return self.chunk.code.items.len > self.curr;
     }
 
     fn next_byte(self: *Self) !u8 {
         if (self.has_next()) {
             defer self.curr += 1;
-            return self.code[self.curr];
+            return self.chunk.code.items[self.curr];
         } else {
             return error.NoBytes;
         }
@@ -490,10 +532,10 @@ pub const ChunkReader = struct {
                 const payload_size = comptime @sizeOf(payload_type);
 
                 if (payload_size > 0) {
-                    const start = self.code[self.curr..];
+                    const start = self.chunk.code.items[self.curr..];
 
                     self.curr += payload_size;
-                    if (self.code.len < self.curr) {
+                    if (self.chunk.code.items.len < self.curr) {
                         return error.NoBytes;
                     }
 
@@ -571,7 +613,7 @@ pub const Disassembler = struct {
                             var val = self.chunk.consts.items[payload];
                             var obj = try val.as(.Object);
                             var str = try obj.as(.String);
-                            print("[{s}]", .{str.str});
+                            print("[{s}]", .{str.inner.str});
                         },
                         else => {},
                     }
