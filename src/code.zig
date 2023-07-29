@@ -1,12 +1,20 @@
 const std = @import("std");
 
+const compiler_mod = @import("compiler.zig");
+
 pub const Instruction = union(enum) {
     const Self = @This();
     const ConstantRef = u8;
+    const ConstantCount = u8;
     const JmpOffset = u16;
+    const UpvalueRef = compiler_mod.Compiler.UpvalueRef;
+    const Closure = struct {
+        upvalues: []UpvalueRef,
+        func: ConstantRef,
+    };
 
     Return,
-    Call: u8,
+    Call: ConstantCount,
 
     Constant: ConstantRef,
     ConstNone,
@@ -24,13 +32,18 @@ pub const Instruction = union(enum) {
     LessThan,
 
     Pop,
-    PopN: ConstantRef,
+    PopN: ConstantCount,
 
     DefineGlobal: ConstantRef,
     GetGlobal: ConstantRef,
     SetGlobal: ConstantRef,
     GetLocal: ConstantRef,
     SetLocal: ConstantRef,
+
+    Closure: Self.Closure,
+    GetUpvalue: ConstantRef,
+    SetUpvalue: ConstantRef,
+    CloseUpvalue,
 
     JmpIfFalse: JmpOffset,
     JmpIfTrue: JmpOffset,
@@ -67,6 +80,8 @@ pub const Object = struct {
     pub const Tag = enum(u8) {
         String,
         Function,
+        Closure,
+        Upvalue,
         NativeFunction,
     };
 
@@ -77,6 +92,8 @@ pub const Object = struct {
             .String => String,
             .Function => Function,
             .NativeFunction => NativeFunction,
+            .Closure => Closure,
+            .Upvalue => Upvalue,
         };
     }
 
@@ -140,7 +157,7 @@ pub const Object = struct {
     }
 
     pub fn print(self: *Self) !void {
-        inline for (.{ .String, .Function, .NativeFunction }) |t| {
+        inline for (.{ .String, .Function, .NativeFunction, .Closure, .Upvalue }) |t| {
             if (self.try_as(t)) |v| {
                 return v.inner.print();
             }
@@ -158,6 +175,17 @@ pub const Object = struct {
 // this allows the new object declarations to always comply to the assumptions made in methods in Object
 // and always initialise with the correct stuff
 // this also allows to define methods on all custom objects at once (don't know how useful that will be :P)
+// reasons: https://craftinginterpreters.com/strings.html#struct-inheritance
+//  - allocations of different kinds of objects can take a different amount of memory
+//    - a tagged union always takes the max of all types within it
+//  - while a pointer to the tag field can be saved whereever which acts as a type erased object
+//  - a type erased pointer with a tag can do the same thing, but then there is another level of indirection.
+// OOF: here, it might also be feasable to use a tagged union of pointers
+//  - the Value type already has a pointer and a tag, and the pointer can be replaced with a tagged union that points to objects
+//  - it might use the same amount of memory as it might use the bits from the other tag in Value type to
+//    represent the tag of Object.
+//    - not too sure for Zig, but rust does this kind of optimisation for Option
+//      (not sure if it does this for other types as well :P)
 pub fn new_object(comptime tag: Object.Tag, comptime val: type) type {
     return struct {
         const Self = @This();
@@ -168,6 +196,16 @@ pub fn new_object(comptime tag: Object.Tag, comptime val: type) type {
 
         pub fn new(inner: Inner) Self {
             return .{ .inner = inner };
+        }
+
+        pub fn as_val(self: *Self) Value {
+            return .{ .Object = &self.tag };
+        }
+
+        pub fn to_val(self: Self, alloc: std.mem.Allocator) !Value {
+            var v = try alloc.create(Self);
+            v.* = self;
+            return v.as_val();
         }
     };
 }
@@ -219,6 +257,7 @@ pub const String = new_object(.String, struct {
     }
 });
 
+// TODO: "closure conversion" "lambda lifting"
 pub const Function = new_object(.Function, struct {
     const Self = @This();
 
@@ -233,6 +272,43 @@ pub const Function = new_object(.Function, struct {
 
     fn print(self: *const Self) void {
         std.debug.print("<fn {s}>", .{self.name});
+    }
+});
+
+pub const Closure = new_object(.Closure, struct {
+    const Self = @This();
+
+    func: *Function,
+    upvalues: []*Upvalue,
+
+    fn deinit(self: *Self, alloc: std.mem.Allocator) void {
+        // self.func.inner.deinit(alloc);
+        std.debug.print("{any} {*}\n", .{ self.upvalues.len, self.upvalues.ptr });
+        alloc.free(self.upvalues);
+        alloc.destroy(self);
+    }
+
+    fn print(self: *const Self) void {
+        self.func.inner.print();
+    }
+});
+
+pub const Upvalue = new_object(.Upvalue, struct {
+    const Self = @This();
+
+    val: *Value,
+    // TODO: this can be a tagged union maybe. as val points to closed when the upvalue if closed, else
+    // val points to some other value, and closed is useless
+    closed: Value,
+    next: ?*Upvalue,
+
+    fn deinit(self: *Self, alloc: std.mem.Allocator) void {
+        // alloc.destroy(self.val);
+        alloc.destroy(self);
+    }
+
+    fn print(_: *const Self) void {
+        std.debug.print("<upvalue>", .{});
     }
 });
 
@@ -481,12 +557,26 @@ pub const Chunk = struct {
         }
 
         switch (inst) {
-            inline else => |payload| {
+            inline else => |payload, tag| {
                 const payload_size = comptime @sizeOf(@TypeOf(payload));
                 info.bytes += payload_size + 1;
 
-                // OOF: endianness might be a problem for getting cross compatible bytecode.
-                try self.code.appendSlice(self.alloc, std.mem.asBytes(&payload));
+                switch (comptime tag) {
+                    .Closure => {
+                        try self.code.append(self.alloc, payload.func);
+                        try self.code.append(self.alloc, @intCast(u8, payload.upvalues.len));
+                        // for (payload.upvalues) |upvalue| {
+                        //     try self.code.appendSlice(self.alloc, std.mem.asBytes(&upvalue));
+                        // }
+                        try self.code.appendSlice(self.alloc, std.mem.sliceAsBytes(payload.upvalues));
+                        std.debug.assert(std.mem.sliceAsBytes(payload.upvalues).len ==
+                            payload.upvalues.len * @sizeOf(Instruction.UpvalueRef));
+                    },
+                    else => {
+                        // OOF: endianness might be a problem for getting cross compatible bytecode.
+                        try self.code.appendSlice(self.alloc, std.mem.asBytes(&payload));
+                    },
+                }
             },
         }
     }
@@ -548,6 +638,7 @@ pub const ChunkReader = struct {
 
         var inst: Instruction = undefined;
 
+        @setEvalBranchQuota(2000);
         switch (opcode) {
             inline else => |tag| {
                 const name = comptime std.meta.tagName(tag);
@@ -555,15 +646,27 @@ pub const ChunkReader = struct {
                 const payload_size = comptime @sizeOf(payload_type);
 
                 if (payload_size > 0) {
-                    const start = self.chunk.code.items[self.curr..];
+                    switch (comptime tag) {
+                        .Closure => {
+                            const func = try self.next_byte();
+                            const len = try self.next_byte() * @sizeOf(Instruction.UpvalueRef);
+                            const v = self.chunk.code.items[self.curr .. self.curr + len];
+                            const val = std.mem.bytesAsSlice(Instruction.UpvalueRef, v);
+                            inst = @unionInit(Instruction, name, .{ .func = func, .upvalues = val });
+                            self.curr += len;
+                        },
+                        else => {
+                            const start = self.chunk.code.items[self.curr..];
 
-                    self.curr += payload_size;
-                    if (self.chunk.code.items.len < self.curr) {
-                        return error.NoBytes;
+                            self.curr += payload_size;
+                            if (self.chunk.code.items.len < self.curr) {
+                                return error.NoBytes;
+                            }
+
+                            const val = std.mem.bytesToValue(payload_type, start[0..payload_size]);
+                            inst = @unionInit(Instruction, name, val);
+                        },
                     }
-
-                    const val = std.mem.bytesToValue(payload_type, start[0..payload_size]);
-                    inst = @unionInit(Instruction, name, val);
                 } else {
                     inst = @unionInit(Instruction, name, {});
                 }
@@ -618,16 +721,21 @@ pub const Disassembler = struct {
 
                 print("{s:<10} ", .{name});
 
-                inline for ([_]u8{0} ** payload_size) |_, j| {
-                    const bytes = std.mem.asBytes(&payload);
-                    const byte = bytes[j];
-                    print("{X:0>2} ", .{byte});
+                switch (comptime tag) {
+                    .Closure => {},
+                    else => {
+                        inline for ([_]u8{0} ** payload_size) |_, j| {
+                            const bytes = std.mem.asBytes(&payload);
+                            const byte = bytes[j];
+                            print("{X:0>2} ", .{byte});
+                        }
+                    },
                 }
 
                 if (payload_size > 0) {
                     print("({}) ", .{payload});
 
-                    switch (tag) {
+                    switch (comptime tag) {
                         .Constant => {
                             const val = self.chunk.consts.items[payload];
                             print("[{}]", .{val});

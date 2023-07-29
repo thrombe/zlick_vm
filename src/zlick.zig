@@ -66,12 +66,18 @@ pub const Zlick = struct {
         var lexer = try Lexer.new(code, self.alloc);
         defer lexer.deinit();
 
-        var func = .{ .Script = code_mod.Function.new(.{
+        var func = try self.alloc.create(code_mod.Function);
+        func.* = code_mod.Function.new(.{
             .arity = 0,
             .name = "<script>",
             .chunk = code_mod.Chunk.new(self.alloc),
-        }) };
-        var compiler = try Compiler.new(&func.Script.inner.chunk, self.alloc);
+        });
+        var closure = try self.alloc.create(code_mod.Closure);
+        closure.* = code_mod.Closure.new(.{
+            .func = func,
+            .upvalues = try self.alloc.alloc(*code_mod.Upvalue, 0),
+        });
+        var compiler = try Compiler.new(&closure.inner.func.inner.chunk, self.alloc);
         defer compiler.deinit();
 
         var tokens = std.ArrayList(Token).init(self.alloc);
@@ -124,9 +130,9 @@ pub const Zlick = struct {
 
         try compiler.end_script();
 
-        var dis = Disassembler.new(&func.Script.inner.chunk);
-        try dis.disassemble_chunk(func.Script.inner.name);
+        var dis = Disassembler.new(&closure.inner.func.inner.chunk);
+        try dis.disassemble_chunk(closure.inner.func.inner.name);
 
-        _ = try self.vm.start_script(&func.Script);
+        _ = try self.vm.start_script(closure);
     }
 };

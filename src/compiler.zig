@@ -23,13 +23,28 @@ pub const Compiler = struct {
         UndefinedVariable,
     };
 
+    const Upvalues = std.ArrayList(UpvalueRef);
+    // this can be replaced with a tagged union LocalIndex: u8, UpvalueIndex: u8
+    pub const UpvalueRef = struct {
+        index: u8,
+        is_local: bool,
+    };
+
     chunk: *Chunk,
     locals: LocalMan,
+    upvalues: Upvalues,
+    enclosing: ?*Self,
     // TODO: remove alloc stored in a chunk maybe
     alloc: std.mem.Allocator,
 
     const LocalMan = struct {
         const LocalsList = std.ArrayList(Local);
+        const Local = struct {
+            name: []const u8,
+            depth: u32,
+            is_captured: bool,
+        };
+
         locals: LocalsList,
         curr_scope: u32 = 0,
 
@@ -42,7 +57,7 @@ pub const Compiler = struct {
         }
 
         fn define(self: *LocalMan, name: []const u8) !void {
-            try self.locals.append(.{ .name = name, .depth = self.curr_scope });
+            try self.locals.append(.{ .name = name, .depth = self.curr_scope, .is_captured = false });
         }
 
         fn resolve(self: *LocalMan, name: []const u8) ?u8 {
@@ -61,10 +76,11 @@ pub const Compiler = struct {
             self.curr_scope += 1;
         }
 
-        fn end_scope(self: *LocalMan) u8 {
+        fn end_scope(self: *LocalMan) []Local {
             self.curr_scope -= 1;
+            const locals = self.locals.items;
 
-            var count: u8 = 0;
+            var count: usize = 0;
             for (self.locals.items) |_| {
                 const j = self.locals.items.len - 1;
                 const val = self.locals.items[j];
@@ -82,13 +98,12 @@ pub const Compiler = struct {
             //     count += 1;
             // }
 
-            return count;
+            const len = self.locals.items.len;
+            // OOF: ArrayList.pop does not deallocate as of now, so this should be fine :P
+            // this slice is of memory outside of self.locals.items
+            // reallocations in locals array invalidate the slice
+            return locals[len .. len + count];
         }
-    };
-
-    const Local = struct {
-        name: []const u8,
-        depth: u32,
     };
 
     pub fn new(chunk: *Chunk, alloc: std.mem.Allocator) !Self {
@@ -103,11 +118,20 @@ pub const Compiler = struct {
             .locals = locals,
             .chunk = chunk,
             .alloc = alloc,
+            .enclosing = null,
+            .upvalues = Upvalues.init(alloc),
         };
+    }
+
+    pub fn enclosed(self: *Self, chunk: *Chunk) !Self {
+        var comp = try Self.new(chunk, self.alloc);
+        comp.enclosing = self;
+        return comp;
     }
 
     pub fn deinit(self: *Self) void {
         self.locals.deinit();
+        self.upvalues.deinit();
     }
 
     fn write_constant(self: *Self, constant: code_mod.Value) !u8 {
@@ -146,6 +170,31 @@ pub const Compiler = struct {
         ));
     }
 
+    fn resolve_upvalue(self: *Self, name: []const u8) !?u8 {
+        if (self.enclosing) |enc| {
+            if (enc.locals.resolve(name)) |c| {
+                enc.locals.locals.items[c].is_captured = true;
+                return try self.add_upvalue(c, true);
+            }
+
+            if (try enc.resolve_upvalue(name)) |c| {
+                return try self.add_upvalue(c, false);
+            }
+        }
+        return null;
+    }
+
+    fn add_upvalue(self: *Self, index: u8, is_local: bool) !u8 {
+        for (self.upvalues.items) |uv, i| {
+            if (uv.index == index and uv.is_local == is_local) {
+                return @intCast(u8, i);
+            }
+        }
+        try self.upvalues.append(.{ .is_local = is_local, .index = index });
+        const ind = self.upvalues.items.len - 1;
+        return @intCast(u8, ind);
+    }
+
     pub fn end_script(self: *Self) !void {
         try self.write_instruction(.ConstNone);
         try self.write_instruction(.Return);
@@ -182,29 +231,36 @@ pub const Compiler = struct {
             .Assign => |val| {
                 try self.compile_expr(val.expr);
 
-                if (self.locals.curr_scope == 0) {
+                if (self.locals.resolve(val.name)) |s| {
+                    try self.write_instruction(.{ .SetLocal = s });
+                } else if (try self.resolve_upvalue(val.name)) |s| {
+                    try self.write_instruction(.{ .SetUpvalue = s });
+                } else {
                     var obj = try self.alloc.create(code_mod.String);
                     obj.* = code_mod.String.new(.{ .str = val.name });
                     const s = try self.write_constant(.{ .Object = &obj.tag });
 
                     try self.write_instruction(.{ .SetGlobal = s });
-                } else {
-                    if (self.locals.resolve(val.name)) |i| {
-                        try self.write_instruction(.{ .SetLocal = i });
-                    } else {
-                        return error.UndefinedVariable;
-                    }
                 }
             },
             .Block => |val| {
                 self.locals.begin_scope();
-                defer {
-                    const num = self.locals.end_scope();
-                    self.write_instruction(.{ .PopN = num }) catch unreachable;
-                }
 
                 for (val) |s| {
                     try self.compile_stmt(s);
+                }
+
+                {
+                    const locals = self.locals.end_scope();
+                    for (locals) |_, i| {
+                        const j = locals.len - i - 1;
+                        if (locals[j].is_captured) {
+                            try self.write_instruction(.CloseUpvalue);
+                        } else {
+                            try self.write_instruction(.Pop);
+                        }
+                    }
+                    // self.write_instruction(.{ .PopN = num }) catch unreachable;
                 }
             },
             .If => |val| {
@@ -245,10 +301,6 @@ pub const Compiler = struct {
             },
             .For => |val| {
                 self.locals.begin_scope();
-                defer {
-                    const num = self.locals.end_scope();
-                    self.write_instruction(.{ .PopN = num }) catch unreachable;
-                }
 
                 if (val.start) |start| {
                     try self.compile_stmt(start);
@@ -274,6 +326,19 @@ pub const Compiler = struct {
                     try self.patch_jmp(.JmpIfFalse, end);
                     try self.write_instruction(.Pop);
                 }
+
+                {
+                    const locals = self.locals.end_scope();
+                    for (locals) |_, i| {
+                        const j = locals.len - i - 1;
+                        if (locals[j].is_captured) {
+                            try self.write_instruction(.CloseUpvalue);
+                        } else {
+                            try self.write_instruction(.Pop);
+                        }
+                    }
+                    // self.write_instruction(.{ .PopN = num }) catch unreachable;
+                }
             },
             .Function => |val| {
                 var n = try self.alloc.alloc(u8, val.name.len);
@@ -286,7 +351,7 @@ pub const Compiler = struct {
                     .chunk = code_mod.Chunk.new(self.alloc),
                 });
 
-                var comp = try Compiler.new(&func.inner.chunk, self.alloc);
+                var comp = try self.enclosed(&func.inner.chunk);
                 defer comp.deinit();
                 for (val.params) |name| {
                     try comp.locals.define(name);
@@ -299,7 +364,7 @@ pub const Compiler = struct {
                 try dis.disassemble_chunk(val.name);
 
                 const s = try self.write_constant(.{ .Object = &func.tag });
-                try self.write_instruction(.{ .Constant = s });
+                try self.write_instruction(.{ .Closure = .{ .func = s, .upvalues = comp.upvalues.items } });
                 if (self.locals.curr_scope == 0) {
                     var obj = try self.alloc.create(code_mod.String);
                     obj.* = code_mod.String.new(.{ .str = val.name });
@@ -410,13 +475,15 @@ pub const Compiler = struct {
             .Group => |val| {
                 try self.compile_expr(val);
             },
-            .Variable => |val| {
-                var obj = try self.alloc.create(code_mod.String);
-
-                if (self.locals.resolve(val)) |s| {
+            .Variable => |name| {
+                if (self.locals.resolve(name)) |s| {
                     try self.write_instruction(.{ .GetLocal = s });
+                } else if (try self.resolve_upvalue(name)) |s| {
+                    try self.write_instruction(.{ .GetUpvalue = s });
                 } else {
-                    obj.* = code_mod.String.new(.{ .str = val });
+                    var obj = try self.alloc.create(code_mod.String);
+
+                    obj.* = code_mod.String.new(.{ .str = name });
                     const s = try self.write_constant(.{ .Object = &obj.tag });
 
                     try self.write_instruction(.{ .GetGlobal = s });

@@ -8,6 +8,8 @@ const Chunk = code_mod.Chunk;
 const Disassembler = code_mod.Disassembler;
 const Value = code_mod.Value;
 const Function = code_mod.Function;
+const Closure = code_mod.Closure;
+const Upvalue = code_mod.Upvalue;
 const ChunkReader = code_mod.ChunkReader;
 
 pub const Vm = struct {
@@ -26,7 +28,7 @@ pub const Vm = struct {
 
     const GlobalValues = std.StringHashMap(Value);
     const CallFrame = struct {
-        func: *Function,
+        closure: *Closure,
         reader: ChunkReader,
         stack_top: usize,
     };
@@ -35,6 +37,8 @@ pub const Vm = struct {
     frame_top: usize = 0,
     stack: []Value,
     stack_top: usize = 0,
+
+    open_upvalues: ?*Upvalue,
 
     // TODO: very inefficient to do a hashmap lookup for every variable.
     // can do some kind of intermediate refrence thing at compile time maybe
@@ -55,26 +59,32 @@ pub const Vm = struct {
         var stack = try alloc.alloc(Value, 256 * 64);
         var globals = GlobalValues.init(alloc);
         var frames = try alloc.alloc(CallFrame, 64);
-        return .{ .stack = stack, .globals = globals, .frames = frames, .alloc = alloc };
+        return .{
+            .stack = stack,
+            .globals = globals,
+            .frames = frames,
+            .open_upvalues = null,
+            .alloc = alloc,
+        };
     }
 
     pub fn deinit(self: *Self) void {
-        for (self.stack) |*val| {
+        for (self.stack[0..self.stack_top]) |*val| {
             val.deinit(self.alloc);
         }
         self.alloc.free(self.stack);
         self.globals.deinit();
     }
 
-    fn push_callframe(self: *Self, func: *Function, args: u8) !*CallFrame {
+    fn push_callframe(self: *Self, closure: *Closure) !*CallFrame {
         if (self.frame_top >= self.frames.len) {
             return error.StackOverflow;
         }
 
         var callf = .{
-            .func = func,
-            .reader = func.inner.chunk.reader(),
-            .stack_top = self.stack_top - args,
+            .closure = closure,
+            .reader = closure.inner.func.inner.chunk.reader(),
+            .stack_top = self.stack_top - closure.inner.func.inner.arity - 1,
         };
         self.frames[self.frame_top] = callf;
         self.frame_top += 1;
@@ -87,7 +97,7 @@ pub const Vm = struct {
             return error.StackUnderflow;
         }
         self.frame_top -= 1;
-        self.stack_top = self.frames[self.frame_top].stack_top - 1;
+        self.stack_top = self.frames[self.frame_top].stack_top;
         if (self.frame_top == 0) {
             return null;
         }
@@ -97,7 +107,7 @@ pub const Vm = struct {
     fn stacktrace(self: *Self) void {
         std.debug.print("---- stack trace ----\n", .{});
         for (self.frames[0..self.frame_top]) |frame| {
-            std.debug.print("fn {s}\n", .{frame.func.inner.name});
+            std.debug.print("fn {s}\n", .{frame.closure.inner.func.inner.name});
         }
         std.debug.print("---- stack trace end ----\n", .{});
     }
@@ -116,8 +126,48 @@ pub const Vm = struct {
         });
     }
 
-    pub fn start_script(self: *Self, func: *Function) !Result {
-        try self.push_value(null);
+    fn capture_upvalue(self: *Self, index: usize) !*Upvalue {
+        var puv: ?*Upvalue = null;
+        var cuv = self.open_upvalues;
+        while (cuv != null and @ptrToInt(cuv.?.inner.val) > @ptrToInt(&self.stack[index])) {
+            puv = cuv;
+            cuv = cuv.?.inner.next;
+        }
+
+        if (cuv != null and @ptrToInt(cuv.?.inner.val) == @ptrToInt(&self.stack[index])) {
+            return cuv.?;
+        }
+
+        var uv = try self.alloc.create(Upvalue);
+        uv.* = Upvalue.new(.{
+            .val = &self.stack[index],
+            .next = null,
+            .closed = Value.new(null),
+        });
+
+        uv.inner.next = cuv;
+        if (puv) |ppuv| {
+            ppuv.inner.next = uv;
+        } else {
+            self.open_upvalues = uv;
+        }
+
+        return uv;
+    }
+
+    fn close_upvalues(self: *Self, last: *Value) void {
+        while (self.open_upvalues != null and @ptrToInt(self.open_upvalues.?.inner.val) >= @ptrToInt(last)) {
+            var uv = self.open_upvalues.?;
+            uv.inner.closed = uv.inner.val.*;
+            uv.inner.val = &uv.inner.closed;
+            self.open_upvalues = uv.inner.next;
+        }
+    }
+
+    pub fn start_script(self: *Self, closure: *Closure) !Result {
+        // try self.push_value(null);
+        // OOF: this closure is not heap allocated
+        try self.push_value(closure.as_val());
 
         const Builtins = struct {
             fn clock(_: []Value) !Value {
@@ -128,11 +178,11 @@ pub const Vm = struct {
 
         errdefer self.stacktrace();
 
-        return try self.run(func);
+        return try self.run(closure);
     }
 
-    pub fn run(self: *Self, func: *Function) !Result {
-        var frame = try self.push_callframe(func, 0);
+    pub fn run(self: *Self, closure: *Closure) !Result {
+        var frame = try self.push_callframe(closure);
 
         while (frame.reader.has_next()) {
             const start = frame.reader.curr;
@@ -147,6 +197,7 @@ pub const Vm = struct {
             switch (inst) {
                 .Return => {
                     var result = try self.pop_value();
+                    self.close_upvalues(&self.stack[frame.stack_top]);
                     frame = try self.pop_callframe() orelse return .Ok;
 
                     try self.push_value(result);
@@ -154,12 +205,12 @@ pub const Vm = struct {
                 .Call => |args| {
                     var callee = self.stack[self.stack_top - 1 - args];
                     switch ((try callee.as(.Object)).tag) {
-                        .Function => {
-                            var cal = callee.as_obj(.Function) catch unreachable;
-                            if (cal.inner.arity != args) {
+                        .Closure => {
+                            var cal = callee.as_obj(.Closure) catch unreachable;
+                            if (cal.inner.func.inner.arity != args) {
                                 return error.IncorrectNumArgs;
                             }
-                            frame = try self.push_callframe(cal, args);
+                            frame = try self.push_callframe(cal);
                         },
                         .NativeFunction => {
                             var cal = callee.as_obj(.NativeFunction) catch unreachable;
@@ -174,6 +225,33 @@ pub const Vm = struct {
                         },
                         else => return error.NotCallable,
                     }
+                },
+                .Closure => |val| {
+                    var obj = frame.reader.chunk.consts.items[val.func];
+                    var fun = try obj.as_obj(.Function);
+
+                    var upvalues = try self.alloc.alloc(*Upvalue, val.upvalues.len);
+                    for (val.upvalues) |uvref, i| {
+                        if (uvref.is_local) {
+                            upvalues[i] = try self.capture_upvalue(frame.stack_top + uvref.index);
+                        } else {
+                            upvalues[i] = frame.closure.inner.upvalues[uvref.index];
+                        }
+                    }
+
+                    var value = code_mod.Closure.new(.{ .func = fun, .upvalues = upvalues });
+                    try self.push_value(try value.to_val(self.alloc));
+                },
+                .SetUpvalue => |c| {
+                    frame.closure.inner.upvalues[c].inner.val.* = try self.pop_value();
+                },
+                .GetUpvalue => |c| {
+                    try self.push_value(frame.closure.inner.upvalues[c].inner.val.*);
+                },
+                .CloseUpvalue => {
+                    const last = &self.stack[self.stack_top - 1];
+                    self.close_upvalues(last);
+                    _ = try self.pop_value();
                 },
                 .Pop => {
                     _ = try self.pop_value();
@@ -201,7 +279,7 @@ pub const Vm = struct {
                     var val = self.globals.getPtr(name.inner.str) orelse return error.UndefinedVariable;
                     val.* = try self.pop_value();
                 },
-                .GetLocal => |i| try self.push_value(self.stack[frame.stack_top + i - 1]),
+                .GetLocal => |i| try self.push_value(self.stack[frame.stack_top + i]),
                 .SetLocal => |i| self.stack[frame.stack_top + i - 1] = try self.pop_value(),
                 .Print => {
                     var val = try self.pop_value();
