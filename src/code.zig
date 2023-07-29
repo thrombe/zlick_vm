@@ -494,23 +494,22 @@ pub const Chunk = struct {
     };
     const LineNoList = std.ArrayListUnmanaged(LineInfo);
 
-    alloc: std.mem.Allocator,
     code: ByteList,
     consts: ConstantList,
 
     line_nos: LineNoList,
 
-    pub fn new(alloc: std.mem.Allocator) Self {
-        return .{ .alloc = alloc, .code = ByteList{}, .consts = ConstantList{}, .line_nos = LineNoList{} };
+    pub fn new() Self {
+        return .{ .code = ByteList{}, .consts = ConstantList{}, .line_nos = LineNoList{} };
     }
 
-    pub fn deinit(self: *Self) void {
-        self.code.deinit(self.alloc);
+    pub fn deinit(self: *Self, alloc: std.mem.Allocator) void {
+        self.code.deinit(alloc);
         for (self.consts.items) |*item| {
-            item.deinit(self.alloc);
+            item.deinit(alloc);
         }
-        self.consts.deinit(self.alloc);
-        self.line_nos.deinit(self.alloc);
+        self.consts.deinit(alloc);
+        self.line_nos.deinit(alloc);
     }
 
     pub fn reader(self: *Self) ChunkReader {
@@ -520,8 +519,8 @@ pub const Chunk = struct {
         };
     }
 
-    pub fn write_constant(self: *Self, constant: Value) !u8 {
-        try self.consts.append(self.alloc, constant);
+    pub fn write_constant(self: *Self, constant: Value, alloc: std.mem.Allocator) !u8 {
+        try self.consts.append(alloc, constant);
         return @intCast(u8, self.consts.items.len - 1);
     }
 
@@ -542,17 +541,17 @@ pub const Chunk = struct {
         }
     }
 
-    pub fn write_instruction(self: *Self, inst: Instruction, line: usize) !void {
+    pub fn write_instruction(self: *Self, inst: Instruction, line: usize, alloc: std.mem.Allocator) !void {
         const opcode = @enumToInt(inst);
-        try self.code.append(self.alloc, opcode);
+        try self.code.append(alloc, opcode);
 
         if (self.line_nos.items.len == 0) {
-            try self.line_nos.append(self.alloc, .{ .line = line, .bytes = 0 });
+            try self.line_nos.append(alloc, .{ .line = line, .bytes = 0 });
         }
 
         var info: *LineInfo = &self.line_nos.items[self.line_nos.items.len - 1];
         if (info.line != line) {
-            try self.line_nos.append(self.alloc, .{ .line = line, .bytes = 0 });
+            try self.line_nos.append(alloc, .{ .line = line, .bytes = 0 });
             info = &self.line_nos.items[self.line_nos.items.len - 1];
         }
 
@@ -563,18 +562,18 @@ pub const Chunk = struct {
 
                 switch (comptime tag) {
                     .Closure => {
-                        try self.code.append(self.alloc, payload.func);
-                        try self.code.append(self.alloc, @intCast(u8, payload.upvalues.len));
+                        try self.code.append(alloc, payload.func);
+                        try self.code.append(alloc, @intCast(u8, payload.upvalues.len));
                         // for (payload.upvalues) |upvalue| {
-                        //     try self.code.appendSlice(self.alloc, std.mem.asBytes(&upvalue));
+                        //     try self.code.appendSlice(alloc, std.mem.asBytes(&upvalue));
                         // }
-                        try self.code.appendSlice(self.alloc, std.mem.sliceAsBytes(payload.upvalues));
+                        try self.code.appendSlice(alloc, std.mem.sliceAsBytes(payload.upvalues));
                         std.debug.assert(std.mem.sliceAsBytes(payload.upvalues).len ==
                             payload.upvalues.len * @sizeOf(Instruction.UpvalueRef));
                     },
                     else => {
                         // OOF: endianness might be a problem for getting cross compatible bytecode.
-                        try self.code.appendSlice(self.alloc, std.mem.asBytes(&payload));
+                        try self.code.appendSlice(alloc, std.mem.asBytes(&payload));
                     },
                 }
             },

@@ -135,11 +135,11 @@ pub const Compiler = struct {
     }
 
     fn write_constant(self: *Self, constant: code_mod.Value) !u8 {
-        return self.chunk.write_constant(constant);
+        return self.chunk.write_constant(constant, self.alloc);
     }
 
     fn write_instruction(self: *Self, inst: Instruction) !void {
-        try self.chunk.write_instruction(inst, 0);
+        try self.chunk.write_instruction(inst, 0, self.alloc);
     }
 
     fn edit_instruction(self: *Self, inst: Instruction, pos: usize) !void {
@@ -348,7 +348,7 @@ pub const Compiler = struct {
                 func.* = Function.new(.{
                     .arity = @intCast(u32, val.params.len),
                     .name = n,
-                    .chunk = code_mod.Chunk.new(self.alloc),
+                    .chunk = code_mod.Chunk.new(),
                 });
 
                 var comp = try self.enclosed(&func.inner.chunk);

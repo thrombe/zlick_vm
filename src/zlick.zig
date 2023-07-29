@@ -70,7 +70,7 @@ pub const Zlick = struct {
         func.* = code_mod.Function.new(.{
             .arity = 0,
             .name = "<script>",
-            .chunk = code_mod.Chunk.new(self.alloc),
+            .chunk = code_mod.Chunk.new(),
         });
         var closure = try self.alloc.create(code_mod.Closure);
         closure.* = code_mod.Closure.new(.{
