@@ -1,5 +1,8 @@
 const std = @import("std");
 
+const build_options = @import("build_options");
+const print_bytecode = build_options.print_bytecode;
+
 const code_mod = @import("code.zig");
 const Chunk = code_mod.Chunk;
 const Instruction = code_mod.Instruction;
@@ -198,6 +201,12 @@ pub const Compiler = struct {
     pub fn end_script(self: *Self) !void {
         try self.write_instruction(.ConstNone);
         try self.write_instruction(.Return);
+
+        if (comptime print_bytecode) {
+            var dis = code_mod.Disassembler.new(self.chunk);
+            try dis.disassemble_chunk("<script>");
+            std.debug.print("----- <code end> -----\n\n", .{});
+        }
     }
 
     pub fn compile_stmt(self: *Self, stmt: *Stmt) !void {
@@ -360,8 +369,10 @@ pub const Compiler = struct {
                 try comp.write_instruction(.ConstNone);
                 try comp.write_instruction(.Return);
 
-                var dis = code_mod.Disassembler.new(&func.inner.chunk);
-                try dis.disassemble_chunk(val.name);
+                if (comptime print_bytecode) {
+                    var dis = code_mod.Disassembler.new(&func.inner.chunk);
+                    try dis.disassemble_chunk(val.name);
+                }
 
                 const s = try self.write_constant(.{ .Object = &func.tag });
                 try self.write_instruction(.{ .Closure = .{ .func = s, .upvalues = comp.upvalues.items } });

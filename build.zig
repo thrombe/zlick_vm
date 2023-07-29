@@ -15,6 +15,7 @@ pub fn build(b: *std.build.Builder) void {
     exe.setTarget(target);
     exe.setBuildMode(mode);
     var options = b.addOptions();
+    options.addOption(bool, "print_bytecode", b.option(bool, "print-bytecode", "prints compiled bytecode") orelse false);
     options.addOption(bool, "trace_enable", b.option(bool, "enable-tracing", "enables VM tracing") orelse false);
     exe.addOptions("build_options", options);
     exe.install();
