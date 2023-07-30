@@ -20,6 +20,7 @@ pub const Vm = struct {
         PeekErr,
         NotCallable,
         IncorrectNumArgs,
+        UndfinedProperty,
     };
     pub const Result = enum {
         Ok,
@@ -242,6 +243,11 @@ pub const Vm = struct {
                             _ = try self.pop_value();
                             try self.push_value(res);
                         },
+                        .Class => {
+                            var class = callee.as_obj(.Class) catch unreachable;
+                            const instance = code_mod.Instance.new(.{ .class = class });
+                            self.stack[self.stack_top - 1 - args] = try instance.to_val(self.zalloc);
+                        },
                         else => return error.NotCallable,
                     }
                 },
@@ -271,6 +277,29 @@ pub const Vm = struct {
                     const last = &self.stack[self.stack_top - 1];
                     self.close_upvalues(last);
                     _ = try self.pop_value();
+                },
+                .SetProperty => |n| {
+                    var str = try frame.reader.chunk.consts.items[n].as_obj(.String);
+                    var name = try self.zalloc.alloc(u8, str.inner.str.len);
+                    std.mem.copy(u8, name, str.inner.str);
+                    errdefer self.zalloc.free(name);
+
+                    var val = try self.pop_value();
+                    var obj = try self.pop_value();
+
+                    var instance = try obj.as_obj(.Instance);
+
+                    // even if this allocation is not gonna go through zalloc's alloc implementation - it should be fine ig
+                    try instance.inner.fields.put(self.zalloc.zalloc, name, val);
+                },
+                .GetProperty => |n| {
+                    var val = try self.pop_value();
+                    var instance = try val.as_obj(.Instance);
+                    var name = try frame.reader.chunk.consts.items[n].as_obj(.String);
+
+                    var prop = instance.inner.fields.get(name.inner.str) orelse return error.UndfinedProperty;
+
+                    try self.push_value(prop);
                 },
                 .Pop => {
                     _ = try self.pop_value();
@@ -563,6 +592,15 @@ pub const Allocator = struct {
             if (comptime build_options.gc_log) dbg("blackening {*} obj: {any}\n", .{ e, e });
 
             switch (e.tag) {
+                .Class => {},
+                .Instance => {
+                    var instance = e.try_as(.Instance).?;
+                    try self.mark_value(instance.inner.class.as_val());
+                    var vals = instance.inner.fields.valueIterator();
+                    while (vals.next()) |v| {
+                        try self.mark_value(v.*);
+                    }
+                },
                 .String => {},
                 .Function => {
                     var fun = e.try_as(.Function).?;

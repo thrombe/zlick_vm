@@ -5,6 +5,8 @@ const compiler_mod = @import("compiler.zig");
 const vm_mod = @import("vm.zig");
 const Allocator = vm_mod.Allocator;
 
+const code_mod = @This();
+
 pub const Instruction = union(enum) {
     const Self = @This();
     pub const ConstantRef = u8;
@@ -48,6 +50,9 @@ pub const Instruction = union(enum) {
     SetUpvalue: ConstantRef,
     CloseUpvalue,
 
+    SetProperty: ConstantRef,
+    GetProperty: ConstantRef,
+
     JmpIfFalse: JmpOffset,
     JmpIfTrue: JmpOffset,
     Jmp: JmpOffset,
@@ -87,6 +92,8 @@ pub const Object = struct {
         Closure,
         Upvalue,
         NativeFunction,
+        Class,
+        Instance,
     };
 
     tag: Tag,
@@ -95,11 +102,7 @@ pub const Object = struct {
 
     fn tag_to_type(comptime tag: Tag) type {
         return switch (tag) {
-            .String => String,
-            .Function => Function,
-            .NativeFunction => NativeFunction,
-            .Closure => Closure,
-            .Upvalue => Upvalue,
+            inline else => |t| @field(code_mod, @tagName(t)),
         };
     }
 
@@ -335,6 +338,43 @@ pub const NativeFunction = new_object(.NativeFunction, struct {
 
     fn call(self: *Self, args: []Value) anyerror!Value {
         return try self.func(args);
+    }
+});
+
+pub const Class = new_object(.Class, struct {
+    const Self = @This();
+
+    name: []const u8,
+
+    fn deinit(self: *Self, zalloc: *Allocator) void {
+        zalloc.free(self.name);
+        zalloc.destroy(self);
+    }
+
+    fn print(self: *const Self) void {
+        std.debug.print("<class {s}>", .{self.name});
+    }
+});
+
+pub const Instance = new_object(.Instance, struct {
+    const Self = @This();
+    const Fields = std.StringHashMapUnmanaged(Value);
+
+    class: *Class,
+    // TODO: intern string identifiers at compile time and map them to ids. (hashmap with strings is slower)
+    fields: Fields = .{},
+
+    fn deinit(self: *Self, zalloc: *Allocator) void {
+        var keys = self.fields.keyIterator();
+        while (keys.next()) |k| {
+            zalloc.free(k.*);
+        }
+        self.fields.deinit(zalloc.zalloc);
+        zalloc.destroy(self);
+    }
+
+    fn print(self: *const Self) void {
+        std.debug.print("<object of {s}>", .{self.class.inner.name});
     }
 });
 
@@ -778,7 +818,7 @@ pub const Disassembler = struct {
                             try val.print();
                             print("]", .{});
                         },
-                        .DefineGlobal, .GetGlobal, .SetGlobal => {
+                        .DefineGlobal, .GetGlobal, .SetGlobal, .SetProperty, .GetProperty => {
                             var val = self.chunk.consts.items[payload];
                             var obj = try val.as(.Object);
                             var str = try obj.as(.String);
