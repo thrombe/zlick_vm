@@ -106,7 +106,7 @@ pub const Zlick = struct {
                 continue;
             }
 
-            var r = compiler.compile_stmt(s) catch |err| {
+            var r = compiler.compile_stmt(s, null) catch |err| {
                 self.had_err = true;
                 std.debug.print("{}\n", .{err});
             };

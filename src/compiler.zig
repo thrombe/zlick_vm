@@ -240,7 +240,12 @@ pub const Compiler = struct {
         return closure;
     }
 
-    pub fn compile_stmt(self: *Self, stmt: *Stmt) !void {
+    const LoopInfo = struct {
+        loop_start: usize,
+        skip: usize,
+    };
+
+    pub fn compile_stmt(self: *Self, stmt: *Stmt, loup: ?LoopInfo) !void {
         switch (stmt.*) {
             .Expr => |expr| {
                 try self.compile_expr(expr);
@@ -289,7 +294,7 @@ pub const Compiler = struct {
                 self.locals.begin_scope();
 
                 for (val) |s| {
-                    try self.compile_stmt(s);
+                    try self.compile_stmt(s, loup);
                 }
 
                 {
@@ -312,7 +317,7 @@ pub const Compiler = struct {
                 try self.write_instruction(.{ .JmpIfFalse = 0 });
 
                 try self.write_instruction(.Pop);
-                try self.compile_stmt(val.if_block);
+                try self.compile_stmt(val.if_block, loup);
 
                 const else_jmp = self.chunk.code.items.len;
                 try self.write_instruction(.{ .Jmp = 0 });
@@ -321,7 +326,7 @@ pub const Compiler = struct {
 
                 try self.write_instruction(.Pop);
                 if (val.else_block) |els| {
-                    try self.compile_stmt(els);
+                    try self.compile_stmt(els, loup);
                 }
 
                 try self.patch_jmp(.Jmp, else_jmp);
@@ -334,7 +339,7 @@ pub const Compiler = struct {
                 try self.write_instruction(.{ .JmpIfFalse = 0 });
 
                 try self.write_instruction(.Pop);
-                try self.compile_stmt(val.block);
+                try self.compile_stmt(val.block, .{ .loop_start = loop_start, .skip = skip });
 
                 try self.loop_to(loop_start);
 
@@ -345,29 +350,28 @@ pub const Compiler = struct {
                 self.locals.begin_scope();
 
                 if (val.start) |start| {
-                    try self.compile_stmt(start);
+                    try self.compile_stmt(start, null);
                 }
                 const loop_start = self.chunk.code.items.len;
-                var end_jmp: ?usize = null;
 
                 if (val.mid) |mid| {
                     try self.compile_expr(mid);
-                    end_jmp = self.chunk.code.items.len;
-                    try self.write_instruction(.{ .JmpIfFalse = 0 });
-                    try self.write_instruction(.Pop);
+                } else {
+                    try self.write_instruction(.ConstTrue);
                 }
+                var end_jmp = self.chunk.code.items.len;
+                try self.write_instruction(.{ .JmpIfFalse = 0 });
+                try self.write_instruction(.Pop);
 
-                try self.compile_stmt(val.block);
+                try self.compile_stmt(val.block, .{ .loop_start = loop_start, .skip = end_jmp });
                 if (val.end) |end| {
-                    try self.compile_stmt(end);
+                    try self.compile_stmt(end, null);
                 }
 
                 try self.loop_to(loop_start);
 
-                if (end_jmp) |end| {
-                    try self.patch_jmp(.JmpIfFalse, end);
-                    try self.write_instruction(.Pop);
-                }
+                try self.patch_jmp(.JmpIfFalse, end_jmp);
+                try self.write_instruction(.Pop);
 
                 {
                     const locals = self.locals.end_scope();
@@ -399,7 +403,7 @@ pub const Compiler = struct {
                 for (val.params) |name| {
                     try comp.locals.define(name);
                 }
-                try comp.compile_stmt(val.body);
+                try comp.compile_stmt(val.body, null);
                 try comp.write_instruction(.ConstNone);
                 try comp.write_instruction(.Return);
 
@@ -430,6 +434,25 @@ pub const Compiler = struct {
                     try self.write_instruction(.ConstNone);
                 }
                 try self.write_instruction(.Return);
+            },
+            // DONE: break and continue statements
+            // -[.] loops already have a condition which can end the loop by jumps
+            //  - pass the address of this jump and simply jump to this instruction on breaks.
+            //  - similar strategy for continue statements. just jump to the instruction where the condition stuff starts.
+            //  - will need to pass these 2 addresses in this function as arguments.
+            // -[x] maybe this function can return some value that encodes where the break / continue instruction was written
+            //   and we can check that value in the immediately enclosing loop and act on it accordingly (like editing the
+            //   instruction to jump out of the loop)
+            //   - will need a list or something to keep track of all the continue and breaks. which is fine as it is only
+            //     needed during compile time.
+            .Continue => {
+                var loop = loup orelse return error.NotInsideLoop;
+                try self.loop_to(loop.loop_start);
+            },
+            .Break => {
+                var loop = loup orelse return error.NotInsideLoop;
+                try self.write_instruction(.ConstFalse);
+                try self.loop_to(loop.skip);
             },
             else => return error.Unimplemented,
         }
