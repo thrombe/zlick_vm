@@ -39,7 +39,6 @@ pub const Compiler = struct {
     locals: LocalMan,
     upvalues: Upvalues,
     enclosing: ?*Self,
-    // TODO: remove alloc stored in a chunk maybe
     alloc: std.mem.Allocator,
     zalloc: *Allocator,
 

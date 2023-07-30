@@ -7,11 +7,11 @@ const Allocator = vm_mod.Allocator;
 
 pub const Instruction = union(enum) {
     const Self = @This();
-    const ConstantRef = u8;
-    const ConstantCount = u8;
-    const JmpOffset = u16;
-    const UpvalueRef = compiler_mod.Compiler.UpvalueRef;
-    const Closure = struct {
+    pub const ConstantRef = u8;
+    pub const ConstantCount = u8;
+    pub const JmpOffset = u16;
+    pub const UpvalueRef = compiler_mod.Compiler.UpvalueRef;
+    pub const Closure = struct {
         upvalues: []UpvalueRef,
         func: ConstantRef,
     };
@@ -163,12 +163,9 @@ pub const Object = struct {
     }
 
     pub fn print(self: *Self) !void {
-        inline for (.{ .String, .Function, .NativeFunction, .Closure, .Upvalue }) |t| {
-            if (self.try_as(t)) |v| {
-                return v.inner.print();
-            }
+        switch (self.tag) {
+            inline else => |itag| self.try_as(itag).?.inner.print(),
         }
-        return error.CannotPrintValue;
     }
 
     pub fn deinit(self: *Self, zalloc: *Allocator) void {
@@ -265,7 +262,6 @@ pub const String = new_object(.String, struct {
     }
 });
 
-// TODO: "closure conversion" "lambda lifting"
 pub const Function = new_object(.Function, struct {
     const Self = @This();
 
@@ -284,6 +280,7 @@ pub const Function = new_object(.Function, struct {
     }
 });
 
+// TODO: "closure conversion" "lambda lifting"
 pub const Closure = new_object(.Closure, struct {
     const Self = @This();
 
@@ -721,7 +718,7 @@ pub const Disassembler = struct {
 
         const print = std.debug.print;
         print("----- {s} -----\n", .{name});
-        print("line no. | byte no. | opcode | args \n\n", .{});
+        print("line no. | byte no. | opcode | args \n", .{});
 
         var inst: Instruction = undefined;
         while (reader.has_next()) {
@@ -747,7 +744,7 @@ pub const Disassembler = struct {
                 const name = comptime std.meta.tagName(tag);
                 const payload_size = comptime @sizeOf(@TypeOf(payload));
 
-                print("{s:<10} ", .{name});
+                print("{s:<15} ", .{name});
 
                 switch (comptime tag) {
                     .Closure => {},
