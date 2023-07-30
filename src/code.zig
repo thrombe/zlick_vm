@@ -747,7 +747,13 @@ pub const Disassembler = struct {
                 print("{s:<15} ", .{name});
 
                 switch (comptime tag) {
-                    .Closure => {},
+                    .Closure => {
+                        print("[fn({})] closure[local|index](", .{payload.func});
+                        for (payload.upvalues) |uv| {
+                            print("[{}|{}]", .{ uv.is_local, uv.index });
+                        }
+                        print(")", .{});
+                    },
                     else => {
                         inline for ([_]u8{0} ** payload_size) |_, j| {
                             const bytes = std.mem.asBytes(&payload);
@@ -758,12 +764,19 @@ pub const Disassembler = struct {
                 }
 
                 if (payload_size > 0) {
-                    print("({}) ", .{payload});
+                    switch (comptime tag) {
+                        .Closure => {},
+                        else => {
+                            print("({}) ", .{payload});
+                        },
+                    }
 
                     switch (comptime tag) {
                         .Constant => {
-                            const val = self.chunk.consts.items[payload];
-                            print("[{}]", .{val});
+                            var val = self.chunk.consts.items[payload];
+                            print("[", .{});
+                            try val.print();
+                            print("]", .{});
                         },
                         .DefineGlobal, .GetGlobal, .SetGlobal => {
                             var val = self.chunk.consts.items[payload];

@@ -201,7 +201,14 @@ pub const Vm = struct {
             const inst = try frame.reader.next_instruction();
 
             if (comptime build_options.trace_enable) {
-                std.debug.print("{any}\n", .{self.stack[0..self.stack_top]});
+                std.debug.print("stack >> ", .{});
+                for (self.stack[0..self.stack_top]) |*e| {
+                    std.debug.print("[", .{});
+                    try e.print();
+                    std.debug.print("]", .{});
+                }
+                std.debug.print("\n", .{});
+
                 var dis = Disassembler.new(frame.reader.chunk);
                 try dis.disassemble_instruction(inst, start);
             }
@@ -543,24 +550,6 @@ pub const Allocator = struct {
                 obj.gc_mark = true;
 
                 if (comptime build_options.gc_log) dbg("marking {*} obj: {any}\n", .{ obj, obj });
-
-                // switch (obj.tag) {
-                //     .String => {
-                //         var str = obj.try_as(.String).?;
-                //     },
-                //     .Function => {
-                //         var fun = obj.try_as(.Function).?;
-                //     },
-                //     .NativeFunction => {
-                //         var nfn = obj.try_as(.NativeFunction).?;
-                //     },
-                //     .Closure => {
-                //         var closure = obj.try_as(.Closure).?;
-                //     },
-                //     .Upvalue => {
-                //         var uv = obj.try_as(.Upvalue).?;
-                //     },
-                // }
 
                 try self.gray_stack.append(obj);
             },
