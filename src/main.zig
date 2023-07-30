@@ -9,12 +9,18 @@ pub fn main() !void {
 
     const alloc = gpa.allocator();
 
+    var zgpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = zgpa.deinit();
+    // var zgpa = std.heap.FixedBufferAllocator.init(try alloc.alloc(u8, 10_000_000));
+    // defer alloc.free(zgpa.buffer);
+    const zalloc = zgpa.allocator();
+
     const args = try std.process.argsAlloc(alloc);
     defer std.process.argsFree(alloc, args);
 
     const stdout = std.io.getStdOut().writer();
 
-    var zlick = try Zlick.new(alloc);
+    var zlick = try Zlick.new(alloc, zalloc);
     defer zlick.deinit();
 
     if (args.len > 2) {

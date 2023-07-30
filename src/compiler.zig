@@ -1,7 +1,6 @@
 const std = @import("std");
 
 const build_options = @import("build_options");
-const print_bytecode = build_options.print_bytecode;
 
 const code_mod = @import("code.zig");
 const Chunk = code_mod.Chunk;
@@ -16,6 +15,9 @@ const Token = lexer_mod.Token;
 const parser_mod = @import("parser.zig");
 const Stmt = parser_mod.Stmt;
 const Expr = parser_mod.Expr;
+
+const vm_mod = @import("vm.zig");
+const Allocator = vm_mod.Allocator;
 
 pub const Compiler = struct {
     const Self = @This();
@@ -39,6 +41,7 @@ pub const Compiler = struct {
     enclosing: ?*Self,
     // TODO: remove alloc stored in a chunk maybe
     alloc: std.mem.Allocator,
+    zalloc: *Allocator,
 
     const LocalMan = struct {
         const LocalsList = std.ArrayList(Local);
@@ -109,7 +112,7 @@ pub const Compiler = struct {
         }
     };
 
-    pub fn new(chunk: *Chunk, alloc: std.mem.Allocator) !Self {
+    pub fn new(chunk: *Chunk, alloc: std.mem.Allocator, zalloc: *Allocator) !Self {
         var locals = LocalMan.new(alloc);
 
         // create an entry for our main script function
@@ -121,13 +124,14 @@ pub const Compiler = struct {
             .locals = locals,
             .chunk = chunk,
             .alloc = alloc,
+            .zalloc = zalloc,
             .enclosing = null,
             .upvalues = Upvalues.init(alloc),
         };
     }
 
     pub fn enclosed(self: *Self, chunk: *Chunk) !Self {
-        var comp = try Self.new(chunk, self.alloc);
+        var comp = try Self.new(chunk, self.alloc, self.zalloc);
         comp.enclosing = self;
         return comp;
     }
@@ -198,15 +202,43 @@ pub const Compiler = struct {
         return @intCast(u8, ind);
     }
 
-    pub fn end_script(self: *Self) !void {
+    pub fn new_script(alloc: std.mem.Allocator, zalloc: *Allocator) !Self {
+        var chunk = try alloc.create(Chunk);
+        chunk.* = Chunk.new(alloc);
+        return Self.new(chunk, alloc, zalloc);
+    }
+
+    pub fn end_script(self: *Self) !*code_mod.Closure {
         try self.write_instruction(.ConstNone);
         try self.write_instruction(.Return);
 
-        if (comptime print_bytecode) {
+        if (comptime build_options.print_bytecode) {
             var dis = code_mod.Disassembler.new(self.chunk);
             try dis.disassemble_chunk("<script>");
             std.debug.print("----- <code end> -----\n\n", .{});
         }
+
+        var chunk = self.chunk.*;
+        self.alloc.destroy(self.chunk);
+
+        var func = try self.zalloc.create(code_mod.Function);
+        const n = "<script>";
+        var name = try self.zalloc.alloc(u8, n.len);
+        std.mem.copy(u8, name, n);
+        func.* = code_mod.Function.new(.{
+            .arity = 0,
+            .name = name,
+            .chunk = chunk,
+        });
+        try self.zalloc.add_val(func.as_val());
+
+        var closure = try self.zalloc.create(code_mod.Closure);
+        closure.* = code_mod.Closure.new(.{
+            .func = func,
+            .upvalues = try self.zalloc.alloc(*code_mod.Upvalue, 0),
+        });
+        try self.zalloc.add_val(closure.as_val());
+        return closure;
     }
 
     pub fn compile_stmt(self: *Self, stmt: *Stmt) !void {
@@ -227,9 +259,10 @@ pub const Compiler = struct {
                 }
 
                 if (self.locals.curr_scope == 0) {
-                    var obj = try self.alloc.create(code_mod.String);
-                    obj.* = code_mod.String.new(.{ .str = val.name });
-                    const s = try self.write_constant(.{ .Object = &obj.tag });
+                    var n = try self.zalloc.alloc(u8, val.name.len);
+                    std.mem.copy(u8, n, val.name);
+                    var obj = code_mod.String.new(.{ .str = n });
+                    const s = try self.write_constant(try obj.to_val(self.zalloc));
 
                     try self.write_instruction(.{ .DefineGlobal = s });
                 } else {
@@ -245,9 +278,10 @@ pub const Compiler = struct {
                 } else if (try self.resolve_upvalue(val.name)) |s| {
                     try self.write_instruction(.{ .SetUpvalue = s });
                 } else {
-                    var obj = try self.alloc.create(code_mod.String);
-                    obj.* = code_mod.String.new(.{ .str = val.name });
-                    const s = try self.write_constant(.{ .Object = &obj.tag });
+                    var n = try self.zalloc.alloc(u8, val.name.len);
+                    std.mem.copy(u8, n, val.name);
+                    var obj = code_mod.String.new(.{ .str = n });
+                    const s = try self.write_constant(try obj.to_val(self.zalloc));
 
                     try self.write_instruction(.{ .SetGlobal = s });
                 }
@@ -350,15 +384,16 @@ pub const Compiler = struct {
                 }
             },
             .Function => |val| {
-                var n = try self.alloc.alloc(u8, val.name.len);
+                var n = try self.zalloc.alloc(u8, val.name.len);
                 std.mem.copy(u8, n, val.name);
 
-                var func = try self.alloc.create(Function);
+                var func = try self.zalloc.create(Function);
                 func.* = Function.new(.{
                     .arity = @intCast(u32, val.params.len),
                     .name = n,
-                    .chunk = code_mod.Chunk.new(),
+                    .chunk = code_mod.Chunk.new(self.alloc),
                 });
+                try self.zalloc.add_val(func.as_val());
 
                 var comp = try self.enclosed(&func.inner.chunk);
                 defer comp.deinit();
@@ -369,19 +404,22 @@ pub const Compiler = struct {
                 try comp.write_instruction(.ConstNone);
                 try comp.write_instruction(.Return);
 
-                if (comptime print_bytecode) {
+                if (comptime build_options.print_bytecode) {
                     var dis = code_mod.Disassembler.new(&func.inner.chunk);
                     try dis.disassemble_chunk(val.name);
                 }
 
-                const s = try self.write_constant(.{ .Object = &func.tag });
-                try self.write_instruction(.{ .Closure = .{ .func = s, .upvalues = comp.upvalues.items } });
+                try self.write_instruction(.{ .Closure = .{
+                    .func = try self.write_constant(func.as_val()),
+                    .upvalues = comp.upvalues.items,
+                } });
                 if (self.locals.curr_scope == 0) {
-                    var obj = try self.alloc.create(code_mod.String);
-                    obj.* = code_mod.String.new(.{ .str = val.name });
-                    const g = try self.write_constant(.{ .Object = &obj.tag });
+                    var name = try self.zalloc.alloc(u8, val.name.len);
+                    std.mem.copy(u8, name, val.name);
+                    var obj = code_mod.String.new(.{ .str = name });
+                    const s = try self.write_constant(try obj.to_val(self.zalloc));
 
-                    try self.write_instruction(.{ .DefineGlobal = g });
+                    try self.write_instruction(.{ .DefineGlobal = s });
                 } else {
                     try self.locals.define(val.name);
                 }
@@ -411,10 +449,10 @@ pub const Compiler = struct {
                     .True => try self.write_instruction(.ConstTrue),
                     .False => try self.write_instruction(.ConstFalse),
                     .String => |str| {
-                        var obj = try self.alloc.create(code_mod.String);
-
-                        obj.* = code_mod.String.new(.{ .str = str });
-                        const s = try self.write_constant(.{ .Object = &obj.tag });
+                        var n = try self.zalloc.alloc(u8, str.len);
+                        std.mem.copy(u8, n, str);
+                        var obj = code_mod.String.new(.{ .str = n });
+                        const s = try self.write_constant(try obj.to_val(self.zalloc));
 
                         try self.write_instruction(.{ .Constant = s });
                     },
@@ -492,10 +530,10 @@ pub const Compiler = struct {
                 } else if (try self.resolve_upvalue(name)) |s| {
                     try self.write_instruction(.{ .GetUpvalue = s });
                 } else {
-                    var obj = try self.alloc.create(code_mod.String);
-
-                    obj.* = code_mod.String.new(.{ .str = name });
-                    const s = try self.write_constant(.{ .Object = &obj.tag });
+                    var n = try self.zalloc.alloc(u8, name.len);
+                    std.mem.copy(u8, n, name);
+                    var obj = code_mod.String.new(.{ .str = n });
+                    const s = try self.write_constant(try obj.to_val(self.zalloc));
 
                     try self.write_instruction(.{ .GetGlobal = s });
                 }

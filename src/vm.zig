@@ -1,7 +1,6 @@
 const std = @import("std");
 
 const build_options = @import("build_options");
-const trace_enabled = build_options.trace_enable;
 
 const code_mod = @import("code.zig");
 const Chunk = code_mod.Chunk;
@@ -51,29 +50,33 @@ pub const Vm = struct {
     // (the vounter value is for each unique string and not each unique variable)
     globals: GlobalValues,
 
+    // allocator for Zlick Vm, compiler, et. al.
     alloc: std.mem.Allocator,
+    // allocator to be used by Zlick objects
+    zalloc: *Allocator,
 
     // TODO: “direct threaded code”, “jump table”, and “computed goto”
 
-    pub fn new(alloc: std.mem.Allocator) !Self {
+    pub fn new(alloc: std.mem.Allocator, zalloc: *Allocator) !Self {
         var stack = try alloc.alloc(Value, 256 * 64);
-        var globals = GlobalValues.init(alloc);
         var frames = try alloc.alloc(CallFrame, 64);
         return .{
             .stack = stack,
-            .globals = globals,
+            .globals = GlobalValues.init(alloc),
             .frames = frames,
             .open_upvalues = null,
             .alloc = alloc,
+            .zalloc = zalloc,
         };
     }
 
     pub fn deinit(self: *Self) void {
-        for (self.stack[0..self.stack_top]) |*val| {
-            val.deinit(self.alloc);
-        }
+        // for (self.stack[0..self.stack_top]) |*val| {
+        //     val.deinit(self.alloc);
+        // }
         self.alloc.free(self.stack);
         self.globals.deinit();
+        self.alloc.free(self.frames);
     }
 
     fn push_callframe(self: *Self, closure: *Closure) !*CallFrame {
@@ -114,16 +117,13 @@ pub const Vm = struct {
 
     fn define_native_fn(self: *Self, comptime fn_name: []const u8, comptime arity: u8, comptime T: type) !void {
         // /usr/lib/zig/std/builtin.zig
-        var val = try self.alloc.create(code_mod.NativeFunction);
-        val.* = code_mod.NativeFunction.new(.{
+        var nfn = code_mod.NativeFunction.new(.{
             // .arity = std.meta.fieldNames(std.meta.ArgsTuple(@TypeOf(@field(@TypeOf(t), fn_name)))).len,
             .arity = arity,
             .name = fn_name,
             .func = @ptrCast(code_mod.NativeFunction.Inner.TypeFunc, &@field(T, fn_name)),
         });
-        try self.globals.put(fn_name, .{
-            .Object = &val.tag,
-        });
+        try self.globals.put(fn_name, try nfn.to_val(self.zalloc));
     }
 
     fn capture_upvalue(self: *Self, index: usize) !*Upvalue {
@@ -138,12 +138,13 @@ pub const Vm = struct {
             return cuv.?;
         }
 
-        var uv = try self.alloc.create(Upvalue);
+        var uv = try self.zalloc.create(Upvalue);
         uv.* = Upvalue.new(.{
             .val = &self.stack[index],
             .next = null,
             .closed = Value.new(null),
         });
+        try self.zalloc.add_val(uv.as_val());
 
         uv.inner.next = cuv;
         if (puv) |ppuv| {
@@ -165,8 +166,6 @@ pub const Vm = struct {
     }
 
     pub fn start_script(self: *Self, closure: *Closure) !Result {
-        // try self.push_value(null);
-        // OOF: this closure is not heap allocated
         try self.push_value(closure.as_val());
 
         const Builtins = struct {
@@ -178,6 +177,19 @@ pub const Vm = struct {
 
         errdefer self.stacktrace();
 
+        self.zalloc.gc_toggle = true;
+        // inside a defer block so that errors also free all the required stuff.
+        defer {
+            self.stack_top = 0;
+            self.frame_top = 0;
+            self.open_upvalues = null;
+            self.globals.clearRetainingCapacity();
+
+            self.zalloc.collect_garbage() catch unreachable;
+
+            self.zalloc.gc_toggle = false;
+        }
+
         return try self.run(closure);
     }
 
@@ -188,7 +200,7 @@ pub const Vm = struct {
             const start = frame.reader.curr;
             const inst = try frame.reader.next_instruction();
 
-            if (trace_enabled) {
+            if (comptime build_options.trace_enable) {
                 std.debug.print("{any}\n", .{self.stack[0..self.stack_top]});
                 var dis = Disassembler.new(frame.reader.chunk);
                 try dis.disassemble_instruction(inst, start);
@@ -230,7 +242,7 @@ pub const Vm = struct {
                     var obj = frame.reader.chunk.consts.items[val.func];
                     var fun = try obj.as_obj(.Function);
 
-                    var upvalues = try self.alloc.alloc(*Upvalue, val.upvalues.len);
+                    var upvalues = try self.zalloc.alloc(*Upvalue, val.upvalues.len);
                     for (val.upvalues) |uvref, i| {
                         if (uvref.is_local) {
                             upvalues[i] = try self.capture_upvalue(frame.stack_top + uvref.index);
@@ -240,7 +252,7 @@ pub const Vm = struct {
                     }
 
                     var value = code_mod.Closure.new(.{ .func = fun, .upvalues = upvalues });
-                    try self.push_value(try value.to_val(self.alloc));
+                    try self.push_value(try value.to_val(self.zalloc));
                 },
                 .SetUpvalue => |c| {
                     frame.closure.inner.upvalues[c].inner.val.* = try self.pop_value();
@@ -390,6 +402,222 @@ pub const Vm = struct {
             return error.PeekErr;
         } else {
             return self.stack[self.stack_top - 1];
+        }
+    }
+};
+
+const dbg = std.debug.print;
+pub const Allocator = struct {
+    const Self = @This();
+
+    const ObjectList = std.ArrayList(*code_mod.Object);
+    const growth_factor = 2;
+
+    zalloc: std.mem.Allocator,
+    aalloc: std.mem.Allocator,
+    vm: *Vm,
+    gc_toggle: bool = false,
+
+    gray_stack: ObjectList,
+    bytes_allocated: u64 = 0,
+    gc_threshold: u64 = 1024 * 1024,
+
+    objects: ObjectList,
+
+    pub fn new(a: std.mem.Allocator, z: std.mem.Allocator, v: *Vm) Self {
+        return .{
+            .aalloc = a,
+            .zalloc = z,
+            .gray_stack = ObjectList.init(a),
+            .objects = ObjectList.init(a),
+            .vm = v,
+        };
+    }
+
+    pub fn deinit(self: *Self) void {
+        self.objects.deinit();
+        self.gray_stack.deinit();
+    }
+
+    pub fn create(self: *Self, comptime T: type) !*T {
+        self.bytes_allocated += @sizeOf(T);
+
+        if (comptime build_options.gc_stresstest) try self.collect_garbage();
+
+        if (self.bytes_allocated > self.gc_threshold) {
+            try self.collect_garbage();
+        }
+
+        const ptr = try self.zalloc.create(T);
+
+        if (comptime build_options.gc_log) dbg("allocate {*} type: {any}\n", .{ ptr, T });
+
+        return ptr;
+    }
+
+    pub fn alloc(self: *Self, comptime T: type, size: usize) ![]T {
+        self.bytes_allocated += size * @sizeOf(T);
+
+        return try self.zalloc.alloc(T, size);
+    }
+
+    pub fn free(self: *Self, slice: anytype) void {
+        self.bytes_allocated -= std.mem.sliceAsBytes(slice).len;
+
+        self.zalloc.free(slice);
+    }
+
+    pub fn destroy(self: *Self, ptr: anytype) void {
+        const T = @typeInfo(@TypeOf(ptr)).Pointer.child;
+
+        if (comptime build_options.gc_log) dbg("destroy {*} type: {any}\n", .{ ptr, T });
+
+        self.bytes_allocated -= @sizeOf(T);
+
+        self.zalloc.destroy(ptr);
+    }
+
+    pub fn collect_garbage(self: *Self) !void {
+        if (!self.gc_toggle) return;
+
+        if (comptime build_options.gc_log) dbg("-- gc start\n", .{});
+
+        var before = self.bytes_allocated;
+
+        defer if (comptime build_options.gc_log) {
+            dbg("-- gc end\n", .{});
+            dbg("collected {} bytes from {} to {}. next at {}\n", .{
+                before - self.bytes_allocated,
+                before,
+                self.bytes_allocated,
+                self.gc_threshold,
+            });
+        };
+
+        try self.mark_roots();
+        if (comptime build_options.gc_log) dbg("tracing refrences: \n", .{});
+        try self.trace_refrences();
+        if (comptime build_options.gc_log) dbg("sweeping: \n", .{});
+        self.sweep();
+
+        self.gc_threshold = self.bytes_allocated * growth_factor;
+    }
+
+    pub fn add_val(self: *Self, val: Value) !void {
+        var v = val;
+        var o = v.as(.Object) catch return;
+        try self.objects.append(o);
+    }
+
+    fn mark_roots(self: *Self) !void {
+        if (comptime build_options.gc_log) dbg("stack values: \n", .{});
+        for (self.vm.stack[0..self.vm.stack_top]) |val| {
+            try self.mark_value(val);
+        }
+
+        if (comptime build_options.gc_log) dbg("global values: \n", .{});
+        var globals = self.vm.globals.iterator();
+        while (globals.next()) |e| {
+            // e.key_ptr; // the objects for these strings are in chunk.consts which do not vary in runtime
+            //  these are deallocated when the chunks are deallocated.
+            try self.mark_value(e.value_ptr.*);
+        }
+
+        if (comptime build_options.gc_log) dbg("frames: \n", .{});
+        for (self.vm.frames[0..self.vm.frame_top]) |frame| {
+            try self.mark_value(frame.closure.as_val());
+        }
+
+        if (comptime build_options.gc_log) dbg("open upvalues: \n", .{});
+        var uv = self.vm.open_upvalues;
+        while (uv != null) : (uv = uv.?.inner.next) {
+            try self.mark_value(uv.?.as_val());
+        }
+    }
+
+    fn mark_value(self: *Self, val: Value) !void {
+        switch (val) {
+            .Bool, .Number, .None => {},
+            .Object => |obj| {
+                if (obj.gc_mark) return;
+                obj.gc_mark = true;
+
+                if (comptime build_options.gc_log) dbg("marking {*} obj: {any}\n", .{ obj, obj });
+
+                // switch (obj.tag) {
+                //     .String => {
+                //         var str = obj.try_as(.String).?;
+                //     },
+                //     .Function => {
+                //         var fun = obj.try_as(.Function).?;
+                //     },
+                //     .NativeFunction => {
+                //         var nfn = obj.try_as(.NativeFunction).?;
+                //     },
+                //     .Closure => {
+                //         var closure = obj.try_as(.Closure).?;
+                //     },
+                //     .Upvalue => {
+                //         var uv = obj.try_as(.Upvalue).?;
+                //     },
+                // }
+
+                try self.gray_stack.append(obj);
+            },
+        }
+    }
+
+    fn trace_refrences(self: *Self) !void {
+        while (true) {
+            var e = self.gray_stack.popOrNull() orelse break;
+
+            if (comptime build_options.gc_log) dbg("blackening {*} obj: {any}\n", .{ e, e });
+
+            switch (e.tag) {
+                .String => {},
+                .Function => {
+                    var fun = e.try_as(.Function).?;
+                    // fun.inner.name; does not need separate handling here :P
+                    for (fun.inner.chunk.consts.items) |v| {
+                        try self.mark_value(v);
+                    }
+                },
+                .NativeFunction => {},
+                .Closure => {
+                    var closure = e.try_as(.Closure).?;
+                    try self.mark_value(closure.inner.func.as_val());
+                    for (closure.inner.upvalues) |v| {
+                        try self.mark_value(v.as_val());
+                    }
+                },
+                .Upvalue => {
+                    var uv = e.try_as(.Upvalue).?;
+                    try self.mark_value(uv.inner.closed);
+                },
+            }
+        }
+    }
+
+    fn sweep(self: *Self) void {
+        var curr: usize = 0;
+
+        while (true) {
+            if (curr == self.objects.items.len) break;
+
+            var obj = self.objects.items[curr];
+            if (obj.gc_mark) {
+                obj.gc_mark = false;
+                curr += 1;
+            } else {
+                if (self.objects.items.len - 1 == curr) {
+                    _ = self.objects.pop();
+                } else {
+                    var last = self.objects.pop();
+                    self.objects.items[curr] = last;
+                }
+
+                obj.deinit(self);
+            }
         }
     }
 };

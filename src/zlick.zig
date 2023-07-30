@@ -21,17 +21,29 @@ pub const Zlick = struct {
     const Self = @This();
 
     alloc: std.mem.Allocator,
-    vm: Vm,
+    zalloc: *vm_mod.Allocator,
+    vm: *Vm,
 
     had_err: bool = false,
 
-    pub fn new(alloc: std.mem.Allocator) !Self {
-        const vm = try Vm.new(alloc);
-        return .{ .alloc = alloc, .vm = vm };
+    pub fn new(alloc: std.mem.Allocator, zalloc: std.mem.Allocator) !Self {
+        var z = try alloc.create(vm_mod.Allocator);
+        var vm = try alloc.create(Vm);
+        vm.* = try Vm.new(alloc, z);
+        z.* = vm_mod.Allocator.new(alloc, zalloc, vm);
+
+        return .{
+            .alloc = alloc,
+            .zalloc = z,
+            .vm = vm,
+        };
     }
 
     pub fn deinit(self: *Self) void {
         self.vm.deinit();
+        self.zalloc.deinit();
+        self.alloc.destroy(self.zalloc);
+        self.alloc.destroy(self.vm);
     }
 
     pub fn repl(self: *Self) !void {
@@ -66,18 +78,7 @@ pub const Zlick = struct {
         var lexer = try Lexer.new(code, self.alloc);
         defer lexer.deinit();
 
-        var func = try self.alloc.create(code_mod.Function);
-        func.* = code_mod.Function.new(.{
-            .arity = 0,
-            .name = "<script>",
-            .chunk = code_mod.Chunk.new(),
-        });
-        var closure = try self.alloc.create(code_mod.Closure);
-        closure.* = code_mod.Closure.new(.{
-            .func = func,
-            .upvalues = try self.alloc.alloc(*code_mod.Upvalue, 0),
-        });
-        var compiler = try Compiler.new(&closure.inner.func.inner.chunk, self.alloc);
+        var compiler = try Compiler.new_script(self.alloc, self.zalloc);
         defer compiler.deinit();
 
         var tokens = std.ArrayList(Token).init(self.alloc);
@@ -128,7 +129,7 @@ pub const Zlick = struct {
             return;
         }
 
-        try compiler.end_script();
+        var closure = try compiler.end_script();
 
         _ = try self.vm.start_script(closure);
     }

@@ -17,6 +17,8 @@ pub fn build(b: *std.build.Builder) void {
     var options = b.addOptions();
     options.addOption(bool, "print_bytecode", b.option(bool, "print-bytecode", "prints compiled bytecode") orelse false);
     options.addOption(bool, "trace_enable", b.option(bool, "enable-tracing", "enables VM tracing") orelse false);
+    options.addOption(bool, "gc_stresstest", b.option(bool, "enable-gc-stress", "enables GC stress test") orelse false);
+    options.addOption(bool, "gc_log", b.option(bool, "enable-gc-log", "enables GC stress logs") orelse false);
     exe.addOptions("build_options", options);
     exe.install();
 

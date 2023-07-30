@@ -2,6 +2,9 @@ const std = @import("std");
 
 const compiler_mod = @import("compiler.zig");
 
+const vm_mod = @import("vm.zig");
+const Allocator = vm_mod.Allocator;
+
 pub const Instruction = union(enum) {
     const Self = @This();
     const ConstantRef = u8;
@@ -53,6 +56,7 @@ pub const Instruction = union(enum) {
     Print,
 
     pub fn size(opcode: Opcode) usize {
+        @setEvalBranchQuota(2000);
         switch (opcode) {
             inline else => |tag| {
                 const payload_type = comptime std.meta.TagPayload(Self, tag);
@@ -86,6 +90,8 @@ pub const Object = struct {
     };
 
     tag: Tag,
+
+    gc_mark: bool = false,
 
     fn tag_to_type(comptime tag: Tag) type {
         return switch (tag) {
@@ -165,9 +171,9 @@ pub const Object = struct {
         return error.CannotPrintValue;
     }
 
-    pub fn deinit(self: *Self, alloc: std.mem.Allocator) void {
+    pub fn deinit(self: *Self, zalloc: *Allocator) void {
         switch (self.tag) {
-            inline else => |itag| self.try_as(itag).?.inner.deinit(alloc),
+            inline else => |itag| self.try_as(itag).?.inner.deinit(zalloc),
         }
     }
 };
@@ -202,10 +208,12 @@ pub fn new_object(comptime tag: Object.Tag, comptime val: type) type {
             return .{ .Object = &self.tag };
         }
 
-        pub fn to_val(self: Self, alloc: std.mem.Allocator) !Value {
-            var v = try alloc.create(Self);
+        pub fn to_val(self: Self, zalloc: *Allocator) !Value {
+            var v = try zalloc.create(Self);
             v.* = self;
-            return v.as_val();
+            var value = v.as_val();
+            try zalloc.add_val(value);
+            return value;
         }
     };
 }
@@ -215,9 +223,9 @@ pub const String = new_object(.String, struct {
 
     str: []const u8,
 
-    fn deinit(self: *Self, alloc: std.mem.Allocator) void {
-        alloc.free(self.str);
-        alloc.destroy(self);
+    fn deinit(self: *Self, zalloc: *Allocator) void {
+        zalloc.free(self.str);
+        zalloc.destroy(self);
     }
 
     fn eq(self: *const Self, other: *const Self) bool {
@@ -265,9 +273,10 @@ pub const Function = new_object(.Function, struct {
     chunk: Chunk,
     name: []const u8,
 
-    fn deinit(self: *Self, alloc: std.mem.Allocator) void {
-        alloc.free(self.name);
-        alloc.destroy(self);
+    fn deinit(self: *Self, zalloc: *Allocator) void {
+        self.chunk.deinit();
+        zalloc.free(self.name);
+        zalloc.destroy(self);
     }
 
     fn print(self: *const Self) void {
@@ -281,11 +290,10 @@ pub const Closure = new_object(.Closure, struct {
     func: *Function,
     upvalues: []*Upvalue,
 
-    fn deinit(self: *Self, alloc: std.mem.Allocator) void {
+    fn deinit(self: *Self, zalloc: *Allocator) void {
         // self.func.inner.deinit(alloc);
-        std.debug.print("{any} {*}\n", .{ self.upvalues.len, self.upvalues.ptr });
-        alloc.free(self.upvalues);
-        alloc.destroy(self);
+        zalloc.free(self.upvalues);
+        zalloc.destroy(self);
     }
 
     fn print(self: *const Self) void {
@@ -302,9 +310,9 @@ pub const Upvalue = new_object(.Upvalue, struct {
     closed: Value,
     next: ?*Upvalue,
 
-    fn deinit(self: *Self, alloc: std.mem.Allocator) void {
+    fn deinit(self: *Self, zalloc: *Allocator) void {
         // alloc.destroy(self.val);
-        alloc.destroy(self);
+        zalloc.destroy(self);
     }
 
     fn print(_: *const Self) void {
@@ -320,8 +328,8 @@ pub const NativeFunction = new_object(.NativeFunction, struct {
     name: []const u8,
     func: TypeFunc,
 
-    fn deinit(self: *Self, alloc: std.mem.Allocator) void {
-        alloc.destroy(self);
+    fn deinit(self: *Self, zalloc: *Allocator) void {
+        zalloc.destroy(self);
     }
 
     fn print(self: *const Self) void {
@@ -354,6 +362,21 @@ test "object tests" {
     dbg("{*}\n", .{try obj.as(.String)});
     dbg("{any}\n", .{lol});
     dbg("{any}\n", .{o1.eq(o2)});
+}
+
+test "defer or something" {
+    const dbg = std.debug.print;
+
+    var a: i64 = 0;
+    // if (comptime true) {
+    defer if (comptime true) {
+        a = std.time.milliTimestamp();
+        _ = std.fs.cwd();
+        dbg("defer ran {}\n", .{a});
+    };
+    // }
+
+    dbg("before defer {}\n", .{a});
 }
 
 pub const Value = union(enum) {
@@ -471,9 +494,9 @@ pub const Value = union(enum) {
         }
     }
 
-    pub fn deinit(self: *Self, alloc: std.mem.Allocator) void {
+    pub fn deinit(self: *Self, zalloc: *Allocator) void {
         switch (self.*) {
-            .Object => |obj| obj.deinit(alloc),
+            .Object => |obj| obj.deinit(zalloc),
             else => {},
         }
     }
@@ -496,20 +519,26 @@ pub const Chunk = struct {
 
     code: ByteList,
     consts: ConstantList,
+    alloc: std.mem.Allocator,
 
     line_nos: LineNoList,
 
-    pub fn new() Self {
-        return .{ .code = ByteList{}, .consts = ConstantList{}, .line_nos = LineNoList{} };
+    pub fn new(alloc: std.mem.Allocator) Self {
+        return .{
+            .code = ByteList{},
+            .consts = ConstantList{},
+            .line_nos = LineNoList{},
+            .alloc = alloc,
+        };
     }
 
-    pub fn deinit(self: *Self, alloc: std.mem.Allocator) void {
-        self.code.deinit(alloc);
-        for (self.consts.items) |*item| {
-            item.deinit(alloc);
-        }
-        self.consts.deinit(alloc);
-        self.line_nos.deinit(alloc);
+    pub fn deinit(self: *Self) void {
+        self.code.deinit(self.alloc);
+        // for (self.consts.items) |*item| {
+        //     item.deinit(alloc);
+        // }
+        self.consts.deinit(self.alloc);
+        self.line_nos.deinit(self.alloc);
     }
 
     pub fn reader(self: *Self) ChunkReader {
