@@ -175,8 +175,6 @@ pub const Vm = struct {
         };
         try self.define_native_fn("clock", 0, Builtins);
 
-        errdefer self.stacktrace();
-
         self.zalloc.gc_toggle = true;
         // inside a defer block so that errors also free all the required stuff.
         defer {
@@ -189,6 +187,8 @@ pub const Vm = struct {
 
             self.zalloc.gc_toggle = false;
         }
+
+        errdefer self.stacktrace();
 
         return try self.run(closure);
     }
