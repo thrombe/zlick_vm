@@ -125,11 +125,13 @@ pub const Zlick = struct {
             // }
         }
 
+        var closure = try compiler.end_script();
+
         if (self.had_err) {
+            self.zalloc.gc_toggle = true;
+            try self.zalloc.collect_garbage();
             return;
         }
-
-        var closure = try compiler.end_script();
 
         _ = try self.vm.start_script(closure);
     }
