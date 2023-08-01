@@ -36,12 +36,21 @@ pub const Compiler = struct {
         is_local: bool,
     };
 
+    pub const FunctionType = enum {
+        Function,
+        Method,
+        Script,
+        Initializer,
+    };
+
     chunk: *Chunk,
     locals: LocalMan,
     upvalues: Upvalues,
     enclosing: ?*Self,
     alloc: std.mem.Allocator,
     zalloc: *Allocator,
+
+    func_type: FunctionType,
 
     const LocalMan = struct {
         const LocalsList = std.ArrayList(Local);
@@ -112,13 +121,17 @@ pub const Compiler = struct {
         }
     };
 
-    pub fn new(chunk: *Chunk, alloc: std.mem.Allocator, zalloc: *Allocator) !Self {
+    fn new(chunk: *Chunk, function_type: FunctionType, alloc: std.mem.Allocator, zalloc: *Allocator) !Self {
         var locals = LocalMan.new(alloc);
 
-        // create an entry for our main script function
-        // try locals.locals.append(.{ .name = "", .depth = 0 });
-        // _ = try chunk.write_constant(.None);
-        try locals.define("");
+        switch (function_type) {
+            .Script, .Function => {
+                try locals.define("");
+            },
+            .Method, .Initializer => {
+                try locals.define("self");
+            },
+        }
 
         return .{
             .locals = locals,
@@ -127,11 +140,12 @@ pub const Compiler = struct {
             .zalloc = zalloc,
             .enclosing = null,
             .upvalues = Upvalues.init(alloc),
+            .func_type = function_type,
         };
     }
 
-    pub fn enclosed(self: *Self, chunk: *Chunk) !Self {
-        var comp = try Self.new(chunk, self.alloc, self.zalloc);
+    pub fn enclosed(self: *Self, chunk: *Chunk, function_type: FunctionType) !Self {
+        var comp = try Self.new(chunk, function_type, self.alloc, self.zalloc);
         comp.enclosing = self;
         return comp;
     }
@@ -205,7 +219,7 @@ pub const Compiler = struct {
     pub fn new_script(alloc: std.mem.Allocator, zalloc: *Allocator) !Self {
         var chunk = try alloc.create(Chunk);
         chunk.* = Chunk.new(alloc);
-        return Self.new(chunk, alloc, zalloc);
+        return Self.new(chunk, .Script, alloc, zalloc);
     }
 
     pub fn end_script(self: *Self) !*code_mod.Closure {
@@ -238,7 +252,7 @@ pub const Compiler = struct {
         return closure;
     }
 
-    fn define_function(self: *Self, val: Stmt.Function) anyerror!void {
+    fn define_function(self: *Self, val: Stmt.Function, function_type: FunctionType) anyerror!void {
         var func = try self.zalloc.create(Function);
         func.* = Function.new(.{
             .arity = @intCast(u32, val.params.len),
@@ -247,14 +261,13 @@ pub const Compiler = struct {
         });
         try self.zalloc.add_val(func.as_val());
 
-        var comp = try self.enclosed(&func.inner.chunk);
+        var comp = try self.enclosed(&func.inner.chunk, function_type);
         defer comp.deinit();
         for (val.params) |name| {
             try comp.locals.define(name);
         }
         try comp.compile_stmt(val.body, null);
-        try comp.write_instruction(.ConstNone);
-        try comp.write_instruction(.Return);
+        try comp.emit_return(null);
 
         if (comptime build_options.print_bytecode) {
             var dis = code_mod.Disassembler.new(&func.inner.chunk);
@@ -265,6 +278,22 @@ pub const Compiler = struct {
             .func = try self.write_constant(func.as_val()),
             .upvalues = comp.upvalues.items,
         } });
+    }
+
+    fn emit_return(self: *Self, val: ?*Expr) !void {
+        // if it is an initializer, then ignore the return value and enforce it to be self
+        if (val) |ret| {
+            try self.compile_expr(ret);
+            if (self.func_type == .Initializer) {
+                try self.write_instruction(.Pop);
+                try self.write_instruction(.{ .GetLocal = self.locals.resolve("self").? });
+            }
+        } else if (self.func_type == .Initializer) {
+            try self.write_instruction(.{ .GetLocal = self.locals.resolve("self").? });
+        } else {
+            try self.write_instruction(.ConstNone);
+        }
+        try self.write_instruction(.Return);
     }
 
     const LoopInfo = struct {
@@ -404,7 +433,7 @@ pub const Compiler = struct {
                 }
             },
             .Function => |val| {
-                try self.define_function(val);
+                try self.define_function(val, .Function);
 
                 if (self.locals.curr_scope == 0) {
                     try self.write_instruction(.{ .DefineGlobal = try self.new_str_const(val.name) });
@@ -413,12 +442,7 @@ pub const Compiler = struct {
                 }
             },
             .Return => |val| {
-                if (val.val) |ret| {
-                    try self.compile_expr(ret);
-                } else {
-                    try self.write_instruction(.ConstNone);
-                }
-                try self.write_instruction(.Return);
+                try self.emit_return(val.val);
             },
             // DONE: break and continue statements
             // -[.] loops already have a condition which can end the loop by jumps
@@ -445,16 +469,28 @@ pub const Compiler = struct {
                 const c = try self.write_constant(try class.to_val(self.zalloc));
                 try self.write_instruction(.{ .Constant = c });
 
+                // if (self.locals.curr_scope == 0) {
+                //     // we keep a Class object on the stack to define methods on it.
+                //     try self.write_instruction(.{ .Constant = c });
+                // }
+                // defer if (self.locals.curr_scope == 0) {
+                //     // pop the extra Class object after methods are defined
+                //     self.write_instruction(.Pop) orelse unreachable;
+                // };
+
+                for (val.methods) |method| {
+                    if (std.mem.eql(u8, method.name, "init")) {
+                        try self.define_function(method, .Initializer);
+                    } else {
+                        try self.define_function(method, .Method);
+                    }
+                    try self.write_instruction(.{ .DefineMethod = try self.new_str_const(method.name) });
+                }
+
                 if (self.locals.curr_scope == 0) {
                     try self.write_instruction(.{ .DefineGlobal = try self.new_str_const(val.name) });
                 } else {
                     try self.locals.define(val.name);
-                }
-
-                for (val.methods) |method| {
-                    try self.define_function(method);
-                    // temp
-                    try self.write_instruction(.Pop);
                 }
             },
             .Set => |val| {
@@ -570,6 +606,15 @@ pub const Compiler = struct {
                 try self.compile_expr(val.object);
 
                 try self.write_instruction(.{ .GetProperty = try self.new_str_const(val.name) });
+            },
+            .Self => {
+                if (self.locals.resolve("self")) |s| {
+                    try self.write_instruction(.{ .GetLocal = s });
+                } else if (try self.resolve_upvalue("self")) |s| {
+                    try self.write_instruction(.{ .GetUpvalue = s });
+                } else {
+                    return error.UndefinedVariable;
+                }
             },
             else => return error.Unimplemented,
         }

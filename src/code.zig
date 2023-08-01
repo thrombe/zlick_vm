@@ -52,6 +52,7 @@ pub const Instruction = union(enum) {
 
     SetProperty: ConstantRef,
     GetProperty: ConstantRef,
+    DefineMethod: ConstantRef,
 
     JmpIfFalse: JmpOffset,
     JmpIfTrue: JmpOffset,
@@ -94,6 +95,7 @@ pub const Object = struct {
         NativeFunction,
         Class,
         Instance,
+        InstanceMethod,
     };
 
     tag: Tag,
@@ -343,10 +345,17 @@ pub const NativeFunction = new_object(.NativeFunction, struct {
 
 pub const Class = new_object(.Class, struct {
     const Self = @This();
+    pub const Methods = std.StringHashMapUnmanaged(*Closure);
 
     name: []const u8,
+    methods: Methods = .{},
 
     fn deinit(self: *Self, zalloc: *Allocator) void {
+        var keys = self.methods.keyIterator();
+        while (keys.next()) |k| {
+            zalloc.free(k.*);
+        }
+        self.methods.deinit(zalloc.zalloc);
         zalloc.free(self.name);
         zalloc.destroy(self);
     }
@@ -375,6 +384,25 @@ pub const Instance = new_object(.Instance, struct {
 
     fn print(self: *const Self) void {
         std.debug.print("<object of {s}>", .{self.class.inner.name});
+    }
+});
+
+pub const InstanceMethod = new_object(.InstanceMethod, struct {
+    const Self = @This();
+
+    self: *Instance,
+    method: *Closure,
+
+    fn deinit(self: *Self, zalloc: *Allocator) void {
+        zalloc.destroy(self);
+    }
+
+    fn print(self: *const Self) void {
+        // std.debug.print("<method {} of {}>", .{
+        //     self.method.inner.func.inner.name,
+        //     self.instance.inner.class.inner.name,
+        // });
+        self.method.inner.print();
     }
 });
 

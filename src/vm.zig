@@ -247,6 +247,23 @@ pub const Vm = struct {
                             var class = callee.as_obj(.Class) catch unreachable;
                             const instance = code_mod.Instance.new(.{ .class = class });
                             self.stack[self.stack_top - 1 - args] = try instance.to_val(self.zalloc);
+
+                            if (class.inner.methods.get("init")) |init| {
+                                if (init.inner.func.inner.arity != args) {
+                                    return error.IncorrectNumArgs;
+                                }
+                                frame = try self.push_callframe(init);
+                            } else if (args != 0) {
+                                return error.IncorrectNumArgs;
+                            }
+                        },
+                        .InstanceMethod => {
+                            var method = callee.as_obj(.InstanceMethod) catch unreachable;
+                            if (method.inner.method.inner.func.inner.arity != args) {
+                                return error.IncorrectNumArgs;
+                            }
+                            self.stack[self.stack_top - 1 - args] = method.inner.self.as_val();
+                            frame = try self.push_callframe(method.inner.method);
                         },
                         else => return error.NotCallable,
                     }
@@ -293,13 +310,38 @@ pub const Vm = struct {
                     try instance.inner.fields.put(self.zalloc.zalloc, name, val);
                 },
                 .GetProperty => |n| {
-                    var val = try self.pop_value();
+                    var val = self.stack[self.stack_top - 1];
                     var instance = try val.as_obj(.Instance);
                     var name = try frame.reader.chunk.consts.items[n].as_obj(.String);
 
-                    var prop = instance.inner.fields.get(name.inner.str) orelse return error.UndfinedProperty;
+                    var prop: Value = undefined;
+                    if (instance.inner.fields.get(name.inner.str)) |p| {
+                        prop = p;
+                    } else if (instance.inner.class.inner.methods.get(name.inner.str)) |m| {
+                        prop = try code_mod.InstanceMethod.new(.{
+                            .self = instance,
+                            .method = m,
+                        }).to_val(self.zalloc);
+                    } else {
+                        return error.UndfinedProperty;
+                    }
+
+                    // garbage collector protection
+                    _ = try self.pop_value();
 
                     try self.push_value(prop);
+                },
+                .DefineMethod => |n| {
+                    var str = try frame.reader.chunk.consts.items[n].as_obj(.String);
+                    var name = try self.zalloc.alloc(u8, str.inner.str.len);
+                    std.mem.copy(u8, name, str.inner.str);
+                    errdefer self.zalloc.free(name);
+
+                    var obj = try self.pop_value();
+                    var method = try obj.as_obj(.Closure);
+                    var class = try self.stack[self.stack_top - 1].as_obj(.Class);
+
+                    try class.inner.methods.put(self.zalloc.zalloc, name, method);
                 },
                 .Pop => {
                     _ = try self.pop_value();
@@ -331,9 +373,8 @@ pub const Vm = struct {
                 .SetLocal => |i| self.stack[frame.stack_top + i - 1] = try self.pop_value(),
                 .Print => {
                     var val = try self.pop_value();
-                    const print = std.debug.print;
                     try val.print();
-                    print("\n", .{});
+                    std.debug.print("\n", .{});
                 },
                 .Constant => |index| {
                     var val = frame.reader.chunk.consts.items[index];
@@ -592,7 +633,13 @@ pub const Allocator = struct {
             if (comptime build_options.gc_log) dbg("blackening {*} obj: {any}\n", .{ e, e });
 
             switch (e.tag) {
-                .Class => {},
+                .Class => {
+                    var class = e.try_as(.Class).?;
+                    var methods = class.inner.methods.valueIterator();
+                    while (methods.next()) |method| {
+                        try self.mark_value(method.*.as_val());
+                    }
+                },
                 .Instance => {
                     var instance = e.try_as(.Instance).?;
                     try self.mark_value(instance.inner.class.as_val());
@@ -600,6 +647,11 @@ pub const Allocator = struct {
                     while (vals.next()) |v| {
                         try self.mark_value(v.*);
                     }
+                },
+                .InstanceMethod => {
+                    var method = e.try_as(.InstanceMethod).?;
+                    try self.mark_value(method.inner.method.as_val());
+                    try self.mark_value(method.inner.self.as_val());
                 },
                 .String => {},
                 .Function => {
