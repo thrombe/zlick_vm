@@ -28,6 +28,11 @@ pub const Expr = union(enum) {
         object: *Expr,
         name: []const u8,
     },
+    Invoke: struct {
+        object: *Expr,
+        name: []const u8,
+        args: []*Expr,
+    },
     Self: Token,
     Super: struct {
         keyword: Token,
@@ -67,6 +72,13 @@ pub const Expr = union(enum) {
             },
             .Get => |val| {
                 val.object.free(alloc);
+            },
+            .Invoke => |val| {
+                val.object.free(alloc);
+                for (val.args) |arg| {
+                    arg.free(alloc);
+                }
+                alloc.free(val.args);
             },
             .Self => {},
             .Super => {},
@@ -846,9 +858,19 @@ pub const Parser = struct {
         var rparen = self.tokens[self.curr];
         self.curr += 1;
 
-        var expr = try self.alloc.create(Expr);
-        expr.* = .{ .Call = .{ .callee = callee, .args = args.toOwnedSlice(), .rparen = rparen } };
-        return expr;
+        var ret: *Expr = undefined;
+        switch (callee.*) {
+            .Get => |val| {
+                callee.* = .{ .Invoke = .{ .object = val.object, .args = args.toOwnedSlice(), .name = val.name } };
+                ret = callee;
+            },
+            else => {
+                var expr = try self.alloc.create(Expr);
+                expr.* = .{ .Call = .{ .callee = callee, .args = args.toOwnedSlice(), .rparen = rparen } };
+                ret = expr;
+            },
+        }
+        return ret;
     }
 
     fn primary(self: *Self) !*Expr {
