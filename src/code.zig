@@ -53,6 +53,8 @@ pub const Instruction = union(enum) {
     SetProperty: ConstantRef,
     GetProperty: ConstantRef,
     DefineMethod: ConstantRef,
+    Inherit,
+    GetSuper: ConstantRef,
 
     JmpIfFalse: JmpOffset,
     JmpIfTrue: JmpOffset,

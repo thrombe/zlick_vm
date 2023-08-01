@@ -307,7 +307,10 @@ pub const Vm = struct {
                     var instance = try obj.as_obj(.Instance);
 
                     // even if this allocation is not gonna go through zalloc's alloc implementation - it should be fine ig
-                    try instance.inner.fields.put(self.zalloc.zalloc, name, val);
+                    var kv = try instance.inner.fields.fetchPut(self.zalloc.zalloc, name, val);
+                    if (kv) |_| {
+                        self.zalloc.free(name);
+                    }
                 },
                 .GetProperty => |n| {
                     var val = self.stack[self.stack_top - 1];
@@ -341,7 +344,40 @@ pub const Vm = struct {
                     var method = try obj.as_obj(.Closure);
                     var class = try self.stack[self.stack_top - 1].as_obj(.Class);
 
-                    try class.inner.methods.put(self.zalloc.zalloc, name, method);
+                    var kv = try class.inner.methods.fetchPut(self.zalloc.zalloc, name, method);
+                    if (kv) |_| {
+                        self.zalloc.free(name);
+                    }
+                },
+                .Inherit => {
+                    var class = try self.stack[self.stack_top - 1].as_obj(.Class);
+                    var super = try self.stack[self.stack_top - 2].as_obj(.Class);
+
+                    var methods = super.inner.methods.iterator();
+                    while (methods.next()) |method| {
+                        var name = try self.zalloc.alloc(u8, method.key_ptr.*.len);
+                        std.mem.copy(u8, name, method.key_ptr.*);
+                        var kv = try class.inner.methods.fetchPut(self.zalloc.zalloc, name, method.value_ptr.*);
+                        if (kv) |_| {
+                            self.zalloc.free(name);
+                        }
+                    }
+
+                    _ = try self.pop_value();
+                },
+                .GetSuper => |m| {
+                    var name = try frame.reader.chunk.consts.items[m].as_obj(.String);
+                    var superclass_val = try self.pop_value();
+                    var superclass = try superclass_val.as_obj(.Class);
+                    var instance_val = try self.pop_value();
+                    var instance = try instance_val.as_obj(.Instance);
+
+                    var method = superclass.inner.methods.get(name.inner.str) orelse return error.UndefinedVariable;
+                    var prop = try code_mod.InstanceMethod.new(.{
+                        .self = instance,
+                        .method = method,
+                    }).to_val(self.zalloc);
+                    try self.push_value(prop);
                 },
                 .Pop => {
                     _ = try self.pop_value();

@@ -27,6 +27,7 @@ pub const Compiler = struct {
         BadBinaryOperator,
         UndefinedVariable,
         NotInsideLoop,
+        CannotInheritFromSelf,
     };
 
     const Upvalues = std.ArrayList(UpvalueRef);
@@ -296,6 +297,23 @@ pub const Compiler = struct {
         try self.write_instruction(.Return);
     }
 
+    fn begin_scope(self: *Self) void {
+        self.locals.begin_scope();
+    }
+
+    fn end_scope(self: *Self) !void {
+        const locals = self.locals.end_scope();
+        for (locals) |_, i| {
+            const j = locals.len - i - 1;
+            if (locals[j].is_captured) {
+                try self.write_instruction(.CloseUpvalue);
+            } else {
+                try self.write_instruction(.Pop);
+            }
+        }
+        // self.write_instruction(.{ .PopN = num }) catch unreachable;
+    }
+
     const LoopInfo = struct {
         loop_start: usize,
         skip: usize,
@@ -337,24 +355,13 @@ pub const Compiler = struct {
                 }
             },
             .Block => |val| {
-                self.locals.begin_scope();
+                self.begin_scope();
 
                 for (val) |s| {
                     try self.compile_stmt(s, loup);
                 }
 
-                {
-                    const locals = self.locals.end_scope();
-                    for (locals) |_, i| {
-                        const j = locals.len - i - 1;
-                        if (locals[j].is_captured) {
-                            try self.write_instruction(.CloseUpvalue);
-                        } else {
-                            try self.write_instruction(.Pop);
-                        }
-                    }
-                    // self.write_instruction(.{ .PopN = num }) catch unreachable;
-                }
+                try self.end_scope();
             },
             .If => |val| {
                 try self.compile_expr(val.condition);
@@ -393,7 +400,7 @@ pub const Compiler = struct {
                 try self.write_instruction(.Pop);
             },
             .For => |val| {
-                self.locals.begin_scope();
+                self.begin_scope();
 
                 if (val.start) |start| {
                     try self.compile_stmt(start, null);
@@ -419,18 +426,7 @@ pub const Compiler = struct {
                 try self.patch_jmp(.JmpIfFalse, end_jmp);
                 try self.write_instruction(.Pop);
 
-                {
-                    const locals = self.locals.end_scope();
-                    for (locals) |_, i| {
-                        const j = locals.len - i - 1;
-                        if (locals[j].is_captured) {
-                            try self.write_instruction(.CloseUpvalue);
-                        } else {
-                            try self.write_instruction(.Pop);
-                        }
-                    }
-                    // self.write_instruction(.{ .PopN = num }) catch unreachable;
-                }
+                try self.end_scope();
             },
             .Function => |val| {
                 try self.define_function(val, .Function);
@@ -469,15 +465,30 @@ pub const Compiler = struct {
                 const c = try self.write_constant(try class.to_val(self.zalloc));
                 try self.write_instruction(.{ .Constant = c });
 
-                // if (self.locals.curr_scope == 0) {
-                //     // we keep a Class object on the stack to define methods on it.
-                //     try self.write_instruction(.{ .Constant = c });
-                // }
-                // defer if (self.locals.curr_scope == 0) {
-                //     // pop the extra Class object after methods are defined
-                //     self.write_instruction(.Pop) orelse unreachable;
-                // };
+                if (self.locals.curr_scope == 0) {
+                    try self.write_instruction(.{ .DefineGlobal = try self.new_str_const(val.name) });
+                } else {
+                    try self.locals.define(val.name);
+                }
 
+                if (val.super) |super| {
+                    if (std.mem.eql(u8, super, val.name)) {
+                        return error.CannotInheritFromSelf;
+                    } else if (self.locals.resolve(super)) |s| {
+                        try self.write_instruction(.{ .GetLocal = s });
+                    } else if (try self.resolve_upvalue(super)) |s| {
+                        try self.write_instruction(.{ .GetUpvalue = s });
+                    } else {
+                        try self.write_instruction(.{ .GetGlobal = try self.new_str_const(super) });
+                    }
+                    try self.write_instruction(.{ .Constant = c });
+                    try self.write_instruction(.Inherit);
+
+                    self.begin_scope();
+                    try self.locals.define("super");
+                }
+
+                try self.write_instruction(.{ .Constant = c });
                 for (val.methods) |method| {
                     if (std.mem.eql(u8, method.name, "init")) {
                         try self.define_function(method, .Initializer);
@@ -486,11 +497,10 @@ pub const Compiler = struct {
                     }
                     try self.write_instruction(.{ .DefineMethod = try self.new_str_const(method.name) });
                 }
+                try self.write_instruction(.Pop);
 
-                if (self.locals.curr_scope == 0) {
-                    try self.write_instruction(.{ .DefineGlobal = try self.new_str_const(val.name) });
-                } else {
-                    try self.locals.define(val.name);
+                if (val.super) |_| {
+                    try self.end_scope();
                 }
             },
             .Set => |val| {
@@ -616,7 +626,22 @@ pub const Compiler = struct {
                     return error.UndefinedVariable;
                 }
             },
-            else => return error.Unimplemented,
+            .Super => |val| {
+                if (self.locals.resolve("self")) |s| {
+                    try self.write_instruction(.{ .GetLocal = s });
+                } else if (try self.resolve_upvalue("self")) |s| {
+                    try self.write_instruction(.{ .GetUpvalue = s });
+                } else {
+                    return error.UndefinedVariable;
+                }
+
+                if (try self.resolve_upvalue("super")) |s| {
+                    try self.write_instruction(.{ .GetUpvalue = s });
+                } else {
+                    return error.UndefinedVariable;
+                }
+                try self.write_instruction(.{ .GetSuper = try self.new_str_const(val.method) });
+            },
         }
     }
 
