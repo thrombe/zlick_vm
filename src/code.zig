@@ -788,7 +788,8 @@ pub const Disassembler = struct {
 
         const print = std.debug.print;
         print("----- {s} -----\n", .{name});
-        print("line no. | byte no. | opcode | args \n", .{});
+        // print("line no. | byte no. | opcode | args \n", .{});
+        print("byte no. |    opcode    | args \n", .{});
 
         var inst: Instruction = undefined;
         while (reader.has_next()) {
@@ -806,8 +807,8 @@ pub const Disassembler = struct {
     pub fn disassemble_instruction(self: *Self, inst: Instruction, start: usize) !void {
         const print = std.debug.print;
 
-        print("{:4} ", .{try self.chunk.get_line_number(start)});
-        print("{:5} ", .{start});
+        // print("{:4} ", .{try self.chunk.get_line_number(start)});
+        print("{:4}       ", .{start});
 
         switch (inst) {
             inline else => |payload, tag| {
