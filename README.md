@@ -9,10 +9,10 @@ This repo contains a bytecode compiler and an virtual machine for the bytecode g
 Zlick's loops are like C's loops, but they ditched the parentheses for a more laid-back coding experience. Who needs parentheses anyway? Loops also supports continue and break statements as an effort to avoid gotos.
 ```
 for let n = 6; n>0; n = n-1; {
-	if n < 3 and n>1 {
-		continue;
-	}
-	print n;
+    if n < 3 and n>1 {
+        continue;
+    }
+    print n;
 }
 ```
 
@@ -20,20 +20,20 @@ for let n = 6; n>0; n = n-1; {
 Zlick is object oriented with support for classes and inheritance. Behold the might of Zlick's classes and their magical methods
 ```
 class Box {
-  // init method is executed when a new object of this class is created.
-	init() {
-		self.size = 2;
-	}
+    // init method is executed when a new object of this class is created.
+    init() {
+        self.size = 2;
+    }
 
-	area() {
-		return self.size * self.size;
-	}
+    area() {
+        return self.size * self.size;
+    }
 }
 
 class Rect < Box {
-	init() {
-		self.size = 3;
-	}
+    init() {
+        self.size = 3;
+    }
 }
 
 print Rect().area(); // 9.0
@@ -98,11 +98,11 @@ print p2("get")("age"); // 99
 Implement your terribly efficient fabonacci function in zlick just like other languages.
 ```
 fn fib(n) {
-	if n <= 1 {
-		return n;
-	} else {
-		return fib(n-2) + fib(n-1);
-	}
+    if n <= 1 {
+        return n;
+    } else {
+        return fib(n-2) + fib(n-1);
+    }
 }
 
 print fib(8);
