@@ -25,12 +25,6 @@ layout {
         }
     }
 
-    pane_template name="nix" {
-        command "nix"
-        args "develop"
-    }
-
-
     tab name="git / broot" stacked=true {
         pane stacked=true {
             pane start_suspended=true name="gitui" {
@@ -42,33 +36,21 @@ layout {
         }
     }
     tab name="helix" focus=true {
-        // pane stacked=true {
-            nix name="helix" {
-                args "develop" "-c" "hx" "."
-            }
-            // nix name="nvim" {
-            //     args "develop" "-c" "nvim" "-c" "Telescope git_files"
-            // }
-        // }
+        pane name="helix" {
+            command "hx"
+            args "."
+        }
     }
     tab name="commands" {
         pane stacked=true {
-            nix start_suspended=true name="run-code" {
-                args "develop" "-c" "zsh" "-ic" "zig build run -- $(fd -t f -d 1 -I -e lick | fzf -1)"
+            pane start_suspended=true name="run-code" {
+                command "zsh"
+                args "-ic" "zig build run -- $(fd -t f -d 1 -I -e lick | fzf -1)"
             }
         }
     }
     tab name="zsh"{
-        pane stacked=true {
-            nix name="nix-shell"
-            pane name="zsh"
-        }
-    }
-    tab name="logs" cwd="" {
-        pane start_suspended=true name="logs" {
-            command "nvim"
-            args "log.log"
-        }
+        pane name="zsh"
     }
 }
 

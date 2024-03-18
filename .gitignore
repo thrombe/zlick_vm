@@ -1,2 +1,6 @@
 zig-out
 zig-cache
+
+test.lick
+notes.md
+.direnv
