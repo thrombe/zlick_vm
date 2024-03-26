@@ -406,7 +406,7 @@ pub const Vm = struct {
                     val.* = try self.pop_value();
                 },
                 .GetLocal => |i| try self.push_value(self.stack[frame.stack_top + i]),
-                .SetLocal => |i| self.stack[frame.stack_top + i - 1] = try self.pop_value(),
+                .SetLocal => |i| self.stack[frame.stack_top + i] = try self.pop_value(),
                 .Print => {
                     var val = try self.pop_value();
                     try val.print();
